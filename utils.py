@@ -335,6 +335,8 @@ def SaveToDb(result):
 		if not k in result:
 			result[k] = ''
 	result['client'] = result['client'].replace("::ffff:","")
+	if len(result['user']) == 0:
+		return
 	if len(result['user']) < 2:
 		print(color('[*] Skipping one character username: %s' % result['user'], 3, 1))
 		text("[*] Skipping one character username: %s" % result['user'])
