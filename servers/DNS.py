@@ -103,10 +103,9 @@ class DNS(BaseRequestHandler):
 			if response:
 				socket_obj.sendto(response, self.client_address)
 				
-				if settings.Config.Verbose:
-					target_ip = self.get_target_ip(query_type)
-					print(color('[DNS] Poisoned response: %s -> %s' % (
-						query_name, target_ip), 2, 1))
+				target_ip = self.get_target_ip(query_type)
+				print(color('[DNS] Poisoned response: %s -> %s' % (
+					query_name, target_ip), 2, 1))
 		
 		except Exception as e:
 			if settings.Config.Verbose:
@@ -642,10 +641,9 @@ class DNSTCP(BaseRequestHandler):
 				tcp_response = struct.pack('>H', len(response)) + response
 				self.request.sendall(tcp_response)
 				
-				if settings.Config.Verbose:
-					target_ip = dns_handler.get_target_ip(query_type)
-					print(color('[DNS-TCP] Poisoned response: %s -> %s' % (
-						query_name, target_ip), 2, 1))
+				target_ip = dns_handler.get_target_ip(query_type)
+				print(color('[DNS-TCP] Poisoned response: %s -> %s' % (
+					query_name, target_ip), 2, 1))
 		
 		except Exception as e:
 			if settings.Config.Verbose:
