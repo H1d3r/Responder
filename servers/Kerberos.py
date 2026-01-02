@@ -582,7 +582,7 @@ class KerbTCP(BaseRequestHandler):
 						etype_name = ENCRYPTION_TYPES.get(bytes([etype_num]), 'unknown')
 						
 						if settings.Config.Verbose:
-							print(color('[KERB] AS-REQ with PA-ENC-TIMESTAMP from %s@%s (etype: %s)' % (cname, realm, etype_name), 3, 1))
+							print(text('[KERB] AS-REQ with PA-ENC-TIMESTAMP from %s@%s (etype: %s)' % (cname, realm, etype_name)))
 						
 						# Build the hash in hashcat format
 						if etype_num == 0x17 or etype_num == 0x18:  # RC4 (23 = 0x17, 24 = 0x18)
@@ -620,7 +620,8 @@ class KerbTCP(BaseRequestHandler):
 						})
 						
 						# Print the hash
-						print(text('[KERB] Use hashcat -m 7500 (etype %d): %s' % (etype_num, hash_value)))
+						if settings.Config.Verbose:
+							print(text('[KERB] Use hashcat -m 7500 (etype %d): %s' % (etype_num, hash_value)))
 					else:
 						if settings.Config.Verbose:
 							print(color('[KERB] AS-REQ with PA-DATA but could not extract hash from %s@%s' % (cname, realm), 1, 1))
@@ -674,7 +675,7 @@ class KerbUDP(BaseRequestHandler):
 						etype_name = ENCRYPTION_TYPES.get(bytes([etype_num]), 'unknown')
 						
 						if settings.Config.Verbose:
-							print(color('[KERB] AS-REQ with PA-ENC-TIMESTAMP from %s@%s (etype: %s)' % (cname, realm, etype_name), 3, 1))
+							print(text('[KERB] AS-REQ with PA-ENC-TIMESTAMP from %s@%s (etype: %s)' % (cname, realm, etype_name)))
 						
 						# Build the hash in hashcat format
 						if etype_num == 0x17 or etype_num == 0x18:  # RC4 (23 = 0x17, 24 = 0x18)
