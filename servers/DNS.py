@@ -253,10 +253,11 @@ class DNS(BaseRequestHandler):
 			return False
 		
 		# Check if domain is in analyze mode targets
-		if hasattr(settings.Config, 'AnalyzeMode'):
-			if settings.Config.AnalyzeMode:
+		# DNS server should not be affected by analyze mode since its not a poisoner, but a rogue DNS server.
+		#if hasattr(settings.Config, 'AnalyzeMode'):
+			#if settings.Config.AnalyzeMode:
 				# In analyze mode, log but don't respond
-				return False
+				#return False
 		
 		# Log interesting queries (authentication-related domains)
 		query_lower = query_name.lower()
