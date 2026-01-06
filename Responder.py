@@ -461,10 +461,6 @@ def main():
 			from servers.SNMP import SNMP
 			threads.append(Thread(target=serve_thread_udp, args=('', 161, SNMP,)))
 
-		if settings.Config.MYSQL_On_Off:
-			from servers.MYSQL import MySQL
-			threads.append(Thread(target=serve_thread_tcp, args=('', 3306, MySQL,)))
-
 		for thread in threads:
 			thread.daemon = True
 			thread.start()
