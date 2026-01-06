@@ -573,3 +573,51 @@ class IMAP(BaseRequestHandler):
 		
 		except Exception as e:
 			return None
+
+class IMAPS(IMAP):
+	"""IMAP over SSL (port 993) - SSL wrapper that inherits from IMAP"""
+	
+	def setup(self):
+		"""Setup SSL socket before handling - called automatically by SocketServer"""
+		try:
+			# Get SSL certificate paths from Responder config
+			cert_path = os.path.join(settings.Config.ResponderPATH, settings.Config.SSLCert)
+			key_path = os.path.join(settings.Config.ResponderPATH, settings.Config.SSLKey)
+			
+			if not os.path.exists(cert_path) or not os.path.exists(key_path):
+				if settings.Config.Verbose:
+					print(text('[IMAPS] SSL certificates not found'))
+				self.request.close()
+				return
+			
+			# Create SSL context
+			context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+			context.load_cert_chain(cert_path, key_path)
+			
+			# Wrap socket in SSL before IMAP handles it
+			self.request = context.wrap_socket(self.request, server_side=True)
+			
+			# Mark as already in TLS so STARTTLS isn't advertised
+			self.tls_enabled = True
+			
+			if settings.Config.Verbose:
+				print(text('[IMAPS] SSL connection from %s' % 
+					self.client_address[0].replace("::ffff:", "")))
+			
+		except ssl.SSLError as e:
+			# Client rejected self-signed cert - suppress expected errors
+			if 'ALERT_BAD_CERTIFICATE' not in str(e) and settings.Config.Verbose:
+				print(text('[IMAPS] SSL handshake failed: %s' % str(e)))
+			try:
+				self.request.close()
+			except:
+				pass
+		except Exception as e:
+			if 'Bad file descriptor' not in str(e) and settings.Config.Verbose:
+				print(text('[IMAPS] SSL setup error: %s' % str(e)))
+			try:
+				self.request.close()
+			except:
+				pass
+	
+	# handle() method is inherited from IMAP class - no need to override!
