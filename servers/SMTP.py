@@ -2,7 +2,6 @@
 # This file is part of Responder, a network take-over set of tools 
 # created and maintained by Laurent Gaffie.
 # email: lgaffie@secorizon.com
-# Enhanced SMTP server with multiple authentication methods
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
@@ -21,6 +20,8 @@ import hashlib
 import codecs
 import struct
 import re
+import ssl
+import os
 
 if settings.Config.PY2OR3 == "PY3":
 	from socketserver import BaseRequestHandler
@@ -29,7 +30,7 @@ else:
 from packets import SMTPGreeting, SMTPAUTH, SMTPAUTH1, SMTPAUTH2
 
 class ESMTP(BaseRequestHandler):
-	"""Enhanced SMTP server with multiple authentication methods"""
+	"""SMTP server with multiple authentication methods and STARTTLS"""
 	
 	def __init__(self, *args, **kwargs):
 		self.challenge = None
@@ -56,6 +57,36 @@ class ESMTP(BaseRequestHandler):
 		else:
 			response = "334\r\n"
 		self.request.send(response.encode('latin-1'))
+	
+	def upgrade_to_tls(self):
+		"""Upgrade connection to TLS using Responder's SSL certificates"""
+		try:
+			# Get SSL certificate paths from Responder config
+			cert_path = os.path.join(settings.Config.ResponderPATH, settings.Config.SSLCert)
+			key_path = os.path.join(settings.Config.ResponderPATH, settings.Config.SSLKey)
+			
+			if not os.path.exists(cert_path) or not os.path.exists(key_path):
+				if settings.Config.Verbose:
+					print(text('[SMTP] SSL certificates not found'))
+				return False
+			
+			# Create SSL context
+			context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+			context.load_cert_chain(cert_path, key_path)
+			
+			# Wrap socket
+			self.request = context.wrap_socket(self.request, server_side=True)
+			
+			if settings.Config.Verbose:
+				print(text('[SMTP] Successfully upgraded to TLS from %s' % 
+					self.client_address[0].replace("::ffff:", "")))
+			
+			return True
+			
+		except Exception as e:
+			if settings.Config.Verbose:
+				print(text('[SMTP] TLS upgrade failed: %s' % str(e)))
+			return False
 	
 	def handle_auth_plain(self, data):
 		"""Handle AUTH PLAIN"""
@@ -526,6 +557,7 @@ class ESMTP(BaseRequestHandler):
 				# Send ESMTP capabilities
 				capabilities = [
 					settings.Config.MachineName + " Hello",
+					"STARTTLS",
 					"AUTH PLAIN LOGIN CRAM-MD5 DIGEST-MD5 NTLM",
 					"SIZE 35651584",
 					"8BITMIME",
@@ -534,6 +566,33 @@ class ESMTP(BaseRequestHandler):
 				]
 				self.send_multiline_response(250, capabilities)
 				data = self.request.recv(1024)
+			
+			# Handle STARTTLS command
+			if data[0:8].upper() == b'STARTTLS':
+				self.send_response(220, "Ready to start TLS")
+				
+				# Upgrade to TLS
+				if self.upgrade_to_tls():
+					# After successful TLS upgrade, client will send EHLO again
+					data = self.request.recv(1024)
+					
+					# Handle EHLO after STARTTLS
+					if data[0:4].upper() == b'EHLO' or data[0:4].upper() == b'HELO':
+						# Send capabilities again (without STARTTLS this time)
+						capabilities = [
+							settings.Config.MachineName + " Hello",
+							"AUTH PLAIN LOGIN CRAM-MD5 DIGEST-MD5 NTLM",
+							"SIZE 35651584",
+							"8BITMIME",
+							"PIPELINING",
+							"ENHANCEDSTATUSCODES"
+						]
+						self.send_multiline_response(250, capabilities)
+						data = self.request.recv(1024)
+				else:
+					# TLS upgrade failed
+					self.send_response(454, "TLS not available")
+					return
 			
 			# Handle AUTH command
 			if data[0:4].upper() == b'AUTH':
