@@ -201,7 +201,7 @@ class SMB1(BaseRequestHandler):  # SMB1 & SMB2 Server class, NTLMSSP
 					break
 
 				if data[0:1] == b"\x81":  #session request 139
-					Buffer = "\x82\x00\x00\x00"
+					Buffer = b"\x82\x00\x00\x00"
 					try:
 						self.request.send(Buffer)
 						data = self.request.recv(1024)
