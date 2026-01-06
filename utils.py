@@ -335,8 +335,6 @@ def SaveToDb(result):
 		if not k in result:
 			result[k] = ''
 	result['client'] = result['client'].replace("::ffff:","")
-	if len(result['user']) == 0:
-		return
 	if len(result['user']) < 2:
 		print(color('[*] Skipping one character username: %s' % result['user'], 3, 1))
 		text("[*] Skipping one character username: %s" % result['user'])
@@ -501,6 +499,7 @@ def StartupMessage():
 	print('    %-27s' % "MDNS" + (enabled if (settings.Config.AnalyzeMode == False and settings.Config.MDNS_On_Off) else disabled))
 	print('    %-27s' % "DNS" + enabled)
 	print('    %-27s' % "DHCP" + (enabled if settings.Config.DHCP_On_Off else disabled))
+	print('    %-27s' % "DHCPv6" + (enabled if settings.Config.DHCPv6_On_Off else disabled))
 	print('')
 
 	print(color("[+] ", 2, 1) + "Servers:")

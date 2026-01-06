@@ -24,6 +24,7 @@
 # - Logs interesting authentication-related domains
 # - Short TTL (60s) to ensure frequent re-queries
 # - IPv6 support for modern networks
+# - Domain filtering to target specific domains only
 #
 from utils import *
 import struct
@@ -244,6 +245,22 @@ class DNS(BaseRequestHandler):
 		# Don't respond to empty queries
 		if not query_name:
 			return False
+		
+		# Domain filtering - only respond to configured domain if set
+		if hasattr(settings.Config, 'DHCPv6_Domain') and settings.Config.DHCPv6_Domain:
+			target_domain = settings.Config.DHCPv6_Domain.lower().strip()
+			query_lower = query_name.lower().strip('.')
+			
+			# Check if query matches domain or is a subdomain
+			if not (query_lower == target_domain or query_lower.endswith('.' + target_domain)):
+				if settings.Config.Verbose:
+					print(text('[DNS] Ignoring query for %s (not in target domain %s)' % (
+						query_name, target_domain)))
+				return False
+			
+			# Log that we're responding to a filtered domain
+			if settings.Config.Verbose:
+				print(color('[DNS] Query matches target domain %s - responding' % target_domain, 3, 1))
 		
 		# Respond to these query types:
 		# A (1), SOA (6), MX (15), TXT (16), AAAA (28), SRV (33), ANY (255)

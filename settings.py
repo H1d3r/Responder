@@ -23,7 +23,7 @@ import subprocess
 
 from utils import *
 
-__version__ = 'Responder 3.1.7.0'
+__version__ = 'Responder 3.2.0.0'
 
 class Settings:
 	
@@ -117,15 +117,17 @@ class Settings:
 
         # Poisoners
 		self.LLMNR_On_Off    = self.toBool(config.get('Responder Core', 'LLMNR'))
-		self.NBTNS_On_Off     = self.toBool(config.get('Responder Core', 'NBTNS'))
+		self.NBTNS_On_Off    = self.toBool(config.get('Responder Core', 'NBTNS'))
 		self.MDNS_On_Off     = self.toBool(config.get('Responder Core', 'MDNS'))
+		self.DHCPv6_On_Off   = self.toBool(config.get('Responder Core', 'DHCPv6'))
 
-		# Servers
+        # Servers
 		self.HTTP_On_Off     = self.toBool(config.get('Responder Core', 'HTTP'))
 		self.SSL_On_Off      = self.toBool(config.get('Responder Core', 'HTTPS'))
 		self.SMB_On_Off      = self.toBool(config.get('Responder Core', 'SMB'))
 		self.QUIC_On_Off     = self.toBool(config.get('Responder Core', 'QUIC'))
 		self.SQL_On_Off      = self.toBool(config.get('Responder Core', 'SQL'))
+		self.MYSQL_On_Off    = self.toBool(config.get('Responder Core', 'MYSQL'))
 		self.FTP_On_Off      = self.toBool(config.get('Responder Core', 'FTP'))
 		self.POP_On_Off      = self.toBool(config.get('Responder Core', 'POP'))
 		self.IMAP_On_Off     = self.toBool(config.get('Responder Core', 'IMAP'))
@@ -159,6 +161,7 @@ class Settings:
 		self.NOESS_On_Off       = options.NOESS_On_Off
 		self.WPAD_On_Off        = options.WPAD_On_Off
 		self.DHCP_On_Off        = options.DHCP_On_Off
+		self.DHCPv6_On_Off      = options.DHCPv6_On_Off
 		self.Basic              = options.Basic
 		self.Interface          = options.Interface
 		self.OURIP              = options.OURIP
@@ -278,6 +281,17 @@ class Settings:
 
 			if not os.path.exists(self.Exe_Filename):
 				print(utils.color("/!\\ Warning: %s: file not found" % self.Exe_Filename, 3, 1))
+
+		# DHCPv6 Server Options
+		try:
+			self.DHCPv6_Domain = config.get('DHCPv6 Server', 'DHCPv6_Domain')
+			self.DHCPv6_SendRA = self.toBool(config.get('DHCPv6 Server', 'SendRA'))
+			self.Bind_To_IPv6 = config.get('DHCPv6 Server', 'BindToIPv6')
+		except:
+		# Defaults if section doesn't exist
+			self.DHCPv6_Domain = ''
+			self.DHCPv6_SendRA = False
+			self.Bind_To_IPv6 = ''
 
 		# SSL Options
 		self.SSLKey  = config.get('HTTPS Server', 'SSLKey')
