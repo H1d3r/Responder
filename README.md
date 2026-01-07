@@ -201,9 +201,9 @@ Options:
 
 You can contribute to this project by donating to the following USDT or Bitcoin address:
 
-USDT: TNS8ZhdkeiMCT6BpXnj4qPfWo3HpoACJwv
+USDT: 0xCc98c1D3b8cd9b717b5257827102940e4E17A19A
 
-BTC: 15X984Qco6bUxaxiR8AmTnQQ5v1LJ2zpNo
+BTC: bc1q9360jedhhmps5vpl3u05vyg4jryrl52dmazz49
 
 Paypal:
 
