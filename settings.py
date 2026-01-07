@@ -231,6 +231,16 @@ class Settings:
 		else:
 			self.ExternalResponderIP6 = self.Bind_To6
 
+		# Kerberos operation mode: CAPTURE (AS-REP hashes) or FORCE_NTLM (force fallback)
+		try:
+			self.KerberosMode = config.get('Kerberos', 'KerberosMode').strip()
+			if self.KerberosMode not in ['CAPTURE', 'FORCE_NTLM']:
+				print('[Config] Invalid KerberosMode: %s, defaulting to CAPTURE' % self.KerberosMode)
+				self.KerberosMode = 'CAPTURE'
+		except:
+			# Default to CAPTURE mode if not specified (backward compatible)
+			self.KerberosMode = 'CAPTURE'
+        
 		self.Os_version      = sys.platform
 
 		self.FTPLog          = os.path.join(self.LogDir, 'FTP-Clear-Text-Password-%s.txt')
