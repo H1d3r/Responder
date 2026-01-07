@@ -492,7 +492,7 @@ def StartupMessage():
 	enabled  = color('[ON]', 2, 1) 
 	disabled = color('[OFF]', 1, 1)
 	print('')
-	print(color("[*] ", 2, 1) + 'Sponsor this project: [USDT: TNS8ZhdkeiMCT6BpXnj4qPfWo3HpoACJwv] , [BTC: 15X984Qco6bUxaxiR8AmTnQQ5v1LJ2zpNo]\n')
+	print(color("[*] ", 2, 1) + 'Tips jar:\n    USDT -> 0xCc98c1D3b8cd9b717b5257827102940e4E17A19A\n    BTC  -> bc1q9360jedhhmps5vpl3u05vyg4jryrl52dmazz49\n')
 	print(color("[+] ", 2, 1) + "Poisoners:")
 	print('    %-27s' % "LLMNR" + (enabled if (settings.Config.AnalyzeMode == False and settings.Config.LLMNR_On_Off) else disabled))
 	print('    %-27s' % "NBT-NS" + (enabled if (settings.Config.AnalyzeMode == False and settings.Config.NBTNS_On_Off) else disabled))
@@ -538,7 +538,6 @@ def StartupMessage():
 	print('    %-27s' % "Force LM downgrade" + (enabled if settings.Config.LM_On_Off == True else disabled))
 	print('    %-27s' % "Force ESS downgrade" + (enabled if settings.Config.NOESS_On_Off == True or settings.Config.LM_On_Off == True else disabled))
 	print('')
-
 	print(color("[+] ", 2, 1) + "Generic Options:")
 	print('    %-27s' % "Responder NIC" + color('[%s]' % settings.Config.Interface, 5, 1))
 	print('    %-27s' % "Responder IP" + color('[%s]' % settings.Config.Bind_To, 5, 1))
