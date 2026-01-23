@@ -22,7 +22,7 @@
 # - MX record poisoning for email client authentication capture
 # - SRV record poisoning for service discovery (Kerberos, LDAP, etc.)
 # - Logs interesting authentication-related domains
-# - Short TTL (60s) to ensure frequent re-queries
+# - 5 minute TTL for efficient caching
 # - Proper IPv6 support (uses -6 option, auto-detects, or skips AAAA)
 # - Domain filtering to target specific domains only
 #
@@ -269,8 +269,6 @@ class DNS(BaseRequestHandler):
 		if query_type == 28:  # AAAA
 			ipv6 = self.get_ipv6_address()
 			if not ipv6:
-				if settings.Config.Verbose:
-					print(text('[DNS] IPv6 disabled on system, not responding to AAAA query for %s' % query_name))
 				return False
 		
 		# Respond to these query types:
@@ -343,8 +341,8 @@ class DNS(BaseRequestHandler):
 			# Class
 			response += struct.pack('>H', query_class)
 			
-			# TTL (short to ensure frequent re-queries)
-			response += struct.pack('>I', 60)  # 60 seconds
+			# TTL (5 minutes for better caching while still allowing updates)
+			response += struct.pack('>I', 300)  # 300 seconds = 5 minutes
 			
 			# Get target IP for A records
 			target_ipv4 = self.get_ipv4_address()
@@ -553,8 +551,6 @@ class DNS(BaseRequestHandler):
 			ipv6 = settings.Config.ExternalIP6
 			# Validate it's not an IPv4-mapped address
 			if not ipv6.startswith('::ffff:'):
-				if settings.Config.Verbose:
-					print(text('[DNS] Using ExternalIP6: %s' % ipv6))
 				return ipv6
 		
 		# Priority 2: Use Bind_To_IPv6 from config
@@ -617,24 +613,18 @@ class DNS(BaseRequestHandler):
 						
 						# Priority 3: Return global IPv6 if available
 						if global_ipv6:
-							if settings.Config.Verbose:
-								print(text('[DNS] Using global IPv6 on %s: %s' % (target_iface, global_ipv6)))
 							return global_ipv6
 						
 						# Priority 4: Fall back to link-local
 						if linklocal_ipv6:
-							if settings.Config.Verbose:
-								print(text('[DNS] Using link-local IPv6 on %s: %s' % (target_iface, linklocal_ipv6)))
 							return linklocal_ipv6
 				except:
 					pass
 					
 		except ImportError:
-			if settings.Config.Verbose:
-				print(text('[DNS] netifaces not installed - cannot auto-detect IPv6'))
+			pass  # netifaces not available
 		except Exception as e:
-			if settings.Config.Verbose:
-				print(text('[DNS] Error detecting IPv6: %s' % str(e)))
+			pass  # IPv6 detection failed silently
 		
 		# No IPv6 found at all (IPv6 disabled on system)
 		return None
@@ -749,8 +739,6 @@ class DNS(BaseRequestHandler):
 		
 		# Default to SMB port for unknown services
 		# This is a reasonable default for credential capture
-		if settings.Config.Verbose:
-			print(text('[DNS] Unknown SRV service in %s, using default port 445' % query_name))
 		return 445
 
 
