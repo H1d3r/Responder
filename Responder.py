@@ -455,7 +455,7 @@ def main():
 		if settings.Config.DNS_On_Off:
 			from servers.DNS import DNS, DNSTCP
 			threads.append(Thread(target=serve_thread_udp, args=('', 53, DNS,)))
-			threads.append(Thread(target=serve_thread_tcp, args=(settings.Config.Bind_To, 53, DNSTCP,)))
+			threads.append(Thread(target=serve_thread_tcp, args=('', 53, DNSTCP,)))
 
 		if settings.Config.SNMP_On_Off:
 			from servers.SNMP import SNMP
