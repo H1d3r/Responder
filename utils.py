@@ -237,38 +237,117 @@ def Probe_IPv6_socket():
 		return True
 	except:
 		return False
-		
+
+
+def IsLinkLocal(ip):
+    """
+    Check if an IPv6 address is link-local (fe80::/10).
+    
+    Link-local addresses are in the range fe80:: to febf::
+    """
+    if ip is None:
+        return False
+    ip_lower = ip.lower()
+    # fe80::/10 means first 10 bits are 1111111010
+    # This covers fe80:: through febf::
+    return ip_lower.startswith('fe8') or ip_lower.startswith('fe9') or \
+           ip_lower.startswith('fea') or ip_lower.startswith('feb')
+
+
+def GetLinkLocalIP6(Iface):
+    """
+    Get the link-local IPv6 address for a specific interface.
+    
+    Args:
+        Iface: Interface name (e.g., 'eth0')
+    
+    Returns:
+        Link-local IPv6 address string, or None if not found
+    """
+    try:
+        addrs = netifaces.ifaddresses(Iface)
+        if netifaces.AF_INET6 not in addrs:
+            return None
+        
+        # Search through all IPv6 addresses for a link-local one
+        for addr_info in addrs[netifaces.AF_INET6]:
+            addr = addr_info.get("addr", "")
+            # Remove interface suffix (e.g., "fe80::1%eth0" -> "fe80::1")
+            clean_addr = addr.split('%')[0]
+            if IsLinkLocal(clean_addr):
+                return clean_addr
+        
+        return None
+    except (KeyError, IndexError, ValueError):
+        return None
+
 def FindLocalIP6(Iface, OURIP):
-	if Iface == 'ALL':
-		return '::'
+    """
+    Find the IPv6 address to bind Responder's servers to.
+    
+    FIXED LOGIC (prioritizes link-local):
+    1. If user provided explicit IPv6 via -6 option, use that
+    2. If interface is 'ALL', return '::' (bind to all interfaces)
+    3. Try to get link-local address (fe80::) - THIS WORKS ON LOCAL NETWORKS
+    4. Fallback to global IPv6 only if link-local not available
+    5. Last resort: ::1 with warning
+    
+    Args:
+        Iface: Network interface name ('eth0') or 'ALL' for wildcard
+        OURIP: User-provided IPv6 via -6 option, or None
+    
+    Returns:
+        IPv6 address string to bind to
+    """
+    # Handle wildcard interface
+    if Iface == 'ALL':
+        return '::'
+    
+    try:
+        # PRIORITY 1: If user explicitly provided an IPv6 address with -6, use it
+        # This preserves the original behavior for users who specify -6
+        if IsIPv6IP(OURIP):
+            return OURIP
+        
+        # PRIORITY 2: Get link-local address (fe80::)
+        # This is the FIX - link-local is ALWAYS reachable on local segment
+        link_local = GetLinkLocalIP6(Iface)
+        if link_local:
+            return link_local
+        
+        # PRIORITY 3: Fallback to global IPv6 via socket trick
+        # Only used if no link-local available (rare on properly configured systems)
+        try:
+            # Connect to random IPv6 to determine source address
+            randIP = "2001:" + ":".join(("%x" % random.randint(0, 16**4) for i in range(7)))
+            s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            s.connect((randIP, 80))
+            IP = s.getsockname()[0]
+            s.close()
+            if IP and IP != '::1':
+                # Warn the user this might not work
+                print(color('[!] Warning: No link-local IPv6 found, using global %s' % IP, 1, 1))
+                print(color('[!] This address may not be reachable on local network!', 1, 1))
+                return IP
+        except:
+            pass
+        
+        # PRIORITY 4: Try to get any IPv6 from the interface
+        try:
+            IP = str(netifaces.ifaddresses(Iface)[netifaces.AF_INET6][0]["addr"].replace("%"+Iface, ""))
+            return IP
+        except:
+            pass
+        
+        # No IPv6 available at all
+        print("[+] You don't have an IPv6 address assigned on %s." % Iface)
+        return '::1'
+    
+    except socket.error:
+        print(color("[!] Error: %s: Interface not found" % Iface, 1))
+        sys.exit(-1)
 
-	try:
 
-		if IsIPv6IP(OURIP) == False:
-			
-			try:
-				#Let's make it random so we don't get spotted easily.
-				randIP = "2001:" + ":".join(("%x" % random.randint(0, 16**4) for i in range(7)))
-				s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-				s.connect((randIP+':80', 1))
-				IP = s.getsockname()[0]
-				return IP
-			except:
-				try:
-					#Try harder; Let's get the local link addr
-					IP = str(netifaces.ifaddresses(Iface)[netifaces.AF_INET6][0]["addr"].replace("%"+Iface, ""))
-					return IP
-				except:
-					IP = '::1'
-					print("[+] You don't have an IPv6 address assigned.")
-					return IP
-
-		else:
-			return OURIP
-		
-	except socket.error:
-		print(color("[!] Error: %s: Interface not found" % Iface, 1))
-		sys.exit(-1)
 		
 # Function used to write captured hashs to a file.
 def WriteData(outfile, data, user):
