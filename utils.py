@@ -336,8 +336,9 @@ def SaveToDb(result):
 			result[k] = ''
 	result['client'] = result['client'].replace("::ffff:","")
 	if len(result['user']) < 2:
-		print(color('[*] Skipping one character username: %s' % result['user'], 3, 1))
-		text("[*] Skipping one character username: %s" % result['user'])
+		#Generate to much output for nothing..
+		#print(color('[*] Skipping one character username: %s' % result['user'], 3, 1))
+		#text("[*] Skipping one character username: %s" % result['user'])
 		return
 
 	cursor = sqlite3.connect(settings.Config.DatabaseFile)
