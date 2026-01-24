@@ -26,31 +26,268 @@ from utils import *
 import struct
 banner()
 
-parser = optparse.OptionParser(usage='python %prog -I eth0 -w -d\nor:\npython %prog -I eth0 -wd', version=settings.__version__, prog=sys.argv[0])
-parser.add_option('-A','--analyze',        action="store_true", help="Analyze mode. This option allows you to see NBT-NS, BROWSER, LLMNR requests without responding.", dest="Analyze", default=False)
-parser.add_option('-I','--interface',      action="store",      help="Network interface to use, you can use 'ALL' as a wildcard for all interfaces", dest="Interface", metavar="eth0", default=None)
-parser.add_option('-i','--ip',             action="store",      help="Local IP to use \033[1m\033[31m(only for OSX)\033[0m", dest="OURIP", metavar="10.0.0.21", default=None)
-parser.add_option('-6', "--externalip6",    action="store",      help="Poison all requests with another IPv6 address than Responder's one.", dest="ExternalIP6",  metavar="2002:c0a8:f7:1:3ba8:aceb:b1a9:81ed", default=None)
-parser.add_option('-e', "--externalip",    action="store",      help="Poison all requests with another IP address than Responder's one.", dest="ExternalIP",  metavar="10.0.0.22", default=None)
-parser.add_option('-b', '--basic',         action="store_true", help="Return a Basic HTTP authentication. Default: NTLM", dest="Basic", default=False)
-parser.add_option('-d', '--DHCP',          action="store_true", help="Enable answers for DHCP broadcast requests. This option will inject a WPAD server in the DHCP response. Default: False", dest="DHCP_On_Off", default=False)
-parser.add_option('-D', '--DHCP-DNS',     action="store_true", help="This option will inject a DNS server in the DHCP response, otherwise a WPAD server will be added. Default: False", dest="DHCP_DNS", default=False)
+import optparse
+import textwrap
 
-parser.add_option('--dhcpv6', action="store_true", help="Enable DHCPv6 poisoning attack (disabled by default). Responds to DHCPv6 SOLICIT messages and configures attacker as DNS server. WARNING: May cause network disruption.", dest="DHCPv6_On_Off", default=False)
+class ResponderHelpFormatter(optparse.IndentedHelpFormatter):
+    """Custom formatter for better help output"""
+    
+    def format_description(self, description):
+        if description:
+            return description + "\n"
+        return ""
+    
+    def format_epilog(self, epilog):
+        if epilog:
+            return "\n" + epilog + "\n"
+        return ""
 
-parser.add_option('-w','--wpad',           action="store_true", help="Start the WPAD rogue proxy server. Default value is False", dest="WPAD_On_Off", default=False)
-parser.add_option('-u','--upstream-proxy', action="store",      help="Upstream HTTP proxy used by the rogue WPAD Proxy for outgoing requests (format: host:port)", dest="Upstream_Proxy", default=None)
-parser.add_option('-F','--ForceWpadAuth',  action="store_true", help="Force NTLM/Basic authentication on wpad.dat file retrieval. This may cause a login prompt. Default: False", dest="Force_WPAD_Auth", default=False)
+def create_parser():
+    """Create argument parser with organized option groups"""
+    
+    usage = textwrap.dedent("""\
+        python3 %prog -I eth0 -v""")
+    
+    description = textwrap.dedent("""\
+    ══════════════════════════════════════════════════════════════════════════════
+      Responder - LLMNR/NBT-NS/mDNS Poisoner and Rogue Authentication Servers
+    ══════════════════════════════════════════════════════════════════════════════
+    Captures credentials by responding to broadcast/multicast name resolution,
+    DHCP, DHCPv6 requests
+    ══════════════════════════════════════════════════════════════════════════════""")
+    
+    epilog = textwrap.dedent("""\
+    ══════════════════════════════════════════════════════════════════════════════
+      Examples:
+    ══════════════════════════════════════════════════════════════════════════════
+      Basic poisoning:            python3 Responder.py -I eth0 -v
+      
+      ##Watch what's going on:
+      Analyze mode (passive):     python3 Responder.py -I eth0 -Av
 
-parser.add_option('-P','--ProxyAuth',       action="store_true", help="Force NTLM (transparently)/Basic (prompt) authentication for the proxy. WPAD doesn't need to be ON. This option is highly effective. Default: False", dest="ProxyAuth_On_Off", default=False)
-parser.add_option('-Q','--quiet',           action="store_true", help="Tell Responder to be quiet, disables a bunch of printing from the poisoners. Default: False", dest="Quiet", default=False)
+      ##Working on old networks:
+      WPAD with forced auth:      python3 Responder.py -I eth0 -wFv
 
-parser.add_option('--lm',                  action="store_true", help="Force LM hashing downgrade for Windows XP/2003 and earlier. Default: False", dest="LM_On_Off", default=False)
-parser.add_option('--disable-ess',         action="store_true", help="Force ESS downgrade. Default: False", dest="NOESS_On_Off", default=False)
-parser.add_option('-v','--verbose',        action="store_true", help="Increase verbosity.", dest="Verbose")
-parser.add_option('-t','--ttl',            action="store",      help="Change the default Windows TTL for poisoned answers. Value in hex (30 seconds = 1e). use '-t random' for random TTL", dest="TTL", metavar="1e", default=None)
-parser.add_option('-N', '--AnswerName',	   action="store",      help="Specifies the canonical name returned by the LLMNR poisoner in its Answer section. By default, the answer's canonical name is the same as the query. Changing this value is mainly useful when attempting to perform Kerberos relaying over HTTP.", dest="AnswerName", default=None)
-parser.add_option('-E', '--ErrorCode',     action="store_true",      help="Changes the error code returned by the SMB server to STATUS_LOGON_FAILURE. By default, the status is STATUS_ACCESS_DENIED. Changing this value permits to obtain WebDAV authentications from the poisoned machines where the WebClient service is running.", dest="ErrorCode", default=False)
+      ##Great module:
+      Proxy auth:                 python3 Responder.py -I eth0 -Pv
+
+      ##DHCPv6 + Proxy authentication:
+      DHCPv6 attack:              python3 Responder.py -I eth0 --dhcpv6 -vP
+
+      ##DHCP -> WPAD injection -> Proxy authentication:
+      DHCP + WPAD injection:      python3 Responder.py -I eth0 -Pvd
+
+      ##Poison requests to an arbitrary IP:
+      Poison with external IP:    python3 Responder.py -I eth0 -e 10.0.0.100
+
+      ##Poison requests to an arbitrary IPv6 IP:
+      Poison with external IPv6:  python3 Responder.py -I eth0 -6 2800:ac:4000:8f9e:c5eb:2193:71:1d12
+    ══════════════════════════════════════════════════════════════════════════════
+      For more info: https://github.com/lgandx/Responder/blob/master/README.md
+    ══════════════════════════════════════════════════════════════════════════════""")
+    
+    parser = optparse.OptionParser(
+        usage=usage,
+        version=settings.__version__,
+        prog="Responder.py",
+        description=description,
+        epilog=epilog,
+        formatter=ResponderHelpFormatter()
+    )
+    
+    # -------------------------------------------------------------------------
+    # REQUIRED OPTIONS
+    # -------------------------------------------------------------------------
+    required = optparse.OptionGroup(parser, 
+        "Required Options",
+        "These options must be specified")
+    
+    required.add_option('-I', '--interface',
+        action="store",
+        dest="Interface",
+        metavar="eth0",
+        default=None,
+        help="Network interface to use. Use 'ALL' for all interfaces.")
+    
+    parser.add_option_group(required)
+    
+    # -------------------------------------------------------------------------
+    # POISONING OPTIONS
+    # -------------------------------------------------------------------------
+    poisoning = optparse.OptionGroup(parser,
+        "Poisoning Options", 
+        "Control how Responder poisons name resolution requests")
+    
+    poisoning.add_option('-A', '--analyze',
+        action="store_true",
+        dest="Analyze",
+        default=False,
+        help="Analyze mode. See requests without poisoning. (passive)")
+    
+    poisoning.add_option('-e', '--externalip',
+        action="store",
+        dest="ExternalIP",
+        metavar="IP",
+        default=None,
+        help="Poison with a different IPv4 address than Responder's.")
+    
+    poisoning.add_option('-6', '--externalip6',
+        action="store",
+        dest="ExternalIP6",
+        metavar="IPv6",
+        default=None,
+        help="Poison with a different IPv6 address than Responder's.")
+    
+    poisoning.add_option('-t', '--ttl',
+        action="store",
+        dest="TTL",
+        metavar="HEX",
+        default=None,
+        help="Set TTL for poisoned answers. Hex value (30s = 1e) or 'random'.")
+    
+    poisoning.add_option('-N', '--AnswerName',
+        action="store",
+        dest="AnswerName",
+        metavar="NAME",
+        default=None,
+        help="Canonical name in LLMNR answers. (for Kerberos relay over HTTP)")
+    
+    parser.add_option_group(poisoning)
+    
+    # -------------------------------------------------------------------------
+    # DHCP OPTIONS
+    # -------------------------------------------------------------------------
+    dhcp = optparse.OptionGroup(parser,
+        "DHCP Options",
+        "DHCP and DHCPv6 poisoning attacks")
+    
+    dhcp.add_option('-d', '--DHCP',
+        action="store_true",
+        dest="DHCP_On_Off",
+        default=False,
+        help="Enable DHCPv4 poisoning. Injects WPAD in DHCP responses.")
+    
+    dhcp.add_option('-D', '--DHCP-DNS',
+        action="store_true",
+        dest="DHCP_DNS",
+        default=False,
+        help="Inject DNS server (not WPAD) in DHCPv4 responses.")
+    
+    dhcp.add_option('--dhcpv6',
+        action="store_true",
+        dest="DHCPv6_On_Off",
+        default=False,
+        help="Enable DHCPv6 poisoning. WARNING: May disrupt network.")
+    
+    parser.add_option_group(dhcp)
+    
+    # -------------------------------------------------------------------------
+    # WPAD / PROXY OPTIONS
+    # -------------------------------------------------------------------------
+    wpad = optparse.OptionGroup(parser,
+        "WPAD / Proxy Options",
+        "Web Proxy Auto-Discovery attacks")
+    
+    wpad.add_option('-w', '--wpad',
+        action="store_true",
+        dest="WPAD_On_Off",
+        default=False,
+        help="Start WPAD rogue proxy server.")
+    
+    wpad.add_option('-F', '--ForceWpadAuth',
+        action="store_true",
+        dest="Force_WPAD_Auth",
+        default=False,
+        help="Force NTLM/Basic auth on wpad.dat retrieval. (may show prompt)")
+    
+    wpad.add_option('-P', '--ProxyAuth',
+        action="store_true",
+        dest="ProxyAuth_On_Off",
+        default=False,
+        help="Force proxy authentication. Highly effective. (can't use with -w)")
+    
+    wpad.add_option('-u', '--upstream-proxy',
+        action="store",
+        dest="Upstream_Proxy",
+        metavar="HOST:PORT",
+        default=None,
+        help="Upstream proxy for rogue WPAD proxy outgoing requests.")
+    
+    parser.add_option_group(wpad)
+    
+    # -------------------------------------------------------------------------
+    # AUTHENTICATION OPTIONS  
+    # -------------------------------------------------------------------------
+    auth = optparse.OptionGroup(parser,
+        "Authentication Options",
+        "Control authentication methods and downgrades")
+    
+    auth.add_option('-b', '--basic',
+        action="store_true",
+        dest="Basic",
+        default=False,
+        help="Return HTTP Basic auth instead of NTLM. (cleartext passwords)")
+    
+    auth.add_option('--lm',
+        action="store_true",
+        dest="LM_On_Off",
+        default=False,
+        help="Force LM hashing downgrade. (for Windows XP/2003)")
+    
+    auth.add_option('--disable-ess',
+        action="store_true",
+        dest="NOESS_On_Off",
+        default=False,
+        help="Disable Extended Session Security. (NTLMv1 downgrade)")
+    
+    auth.add_option('-E', '--ErrorCode',
+        action="store_true",
+        dest="ErrorCode",
+        default=False,
+        help="Return STATUS_LOGON_FAILURE. (enables WebDAV auth capture)")
+    
+    parser.add_option_group(auth)
+    
+    # -------------------------------------------------------------------------
+    # OUTPUT OPTIONS
+    # -------------------------------------------------------------------------
+    output = optparse.OptionGroup(parser,
+        "Output Options",
+        "Control verbosity and logging")
+    
+    output.add_option('-v', '--verbose',
+        action="store_true",
+        dest="Verbose",
+        default=False,
+        help="Increase verbosity. (recommended)")
+    
+    output.add_option('-Q', '--quiet',
+        action="store_true",
+        dest="Quiet",
+        default=False,
+        help="Quiet mode. Minimal output from poisoners.")
+    
+    parser.add_option_group(output)
+    
+    # -------------------------------------------------------------------------
+    # PLATFORM OPTIONS
+    # -------------------------------------------------------------------------
+    platform = optparse.OptionGroup(parser,
+        "Platform Options",
+        "OS-specific settings")
+    
+    platform.add_option('-i', '--ip',
+        action="store",
+        dest="OURIP",
+        metavar="IP",
+        default=None,
+        help="Local IP to use. (OSX only)")
+    
+    parser.add_option_group(platform)
+    
+    return parser
+
+parser = create_parser()
 options, args = parser.parse_args()
 
 if not os.geteuid() == 0:
