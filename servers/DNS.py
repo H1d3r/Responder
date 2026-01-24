@@ -531,103 +531,25 @@ class DNS(BaseRequestHandler):
 		"""
 		Get IPv6 address for AAAA responses
 		
-		Returns a valid native IPv6 address.
+		Returns the IPv6 address Responder is configured to use:
+		1. ExternalIP6 if set (-6 command line option)
+		2. Bind_To6 (already determined by FindLocalIP6 at startup)
 		
-		Priority order:
-		1. ExternalIP6 (-6 command line option)
-		2. Bind_To_IPv6 from config file
-		3. Link-local fe80:: on interface (PREFERRED - always reachable locally!)
-		4. Global IPv6 on interface (fallback - may not be routable on local segment)
-		
-		Link-local addresses are preferred because:
-		- Responder operates on the local network segment
-		- Link-local addresses are ALWAYS reachable on the local segment
-		- Global /128 addresses may not be routable without proper IPv6 infrastructure
-		- fe80:: is always available when IPv6 is enabled
-		
-		Does NOT return IPv4-mapped addresses (::ffff:x.x.x.x).
+		Does NOT return IPv4-mapped addresses (::ffff:x.x.x.x) or localhost.
 		"""
 		# Priority 1: Use ExternalIP6 if set (-6 command line option)
 		if hasattr(settings.Config, 'ExternalIP6') and settings.Config.ExternalIP6:
 			ipv6 = settings.Config.ExternalIP6
-			# Validate it's not an IPv4-mapped address
-			if not ipv6.startswith('::ffff:'):
+			if ipv6 and ipv6 not in ('::1', '') and not ipv6.startswith('::ffff:'):
 				return ipv6
 		
-		# Priority 2: Use Bind_To_IPv6 from config
-		if hasattr(settings.Config, 'Bind_To_IPv6') and settings.Config.Bind_To_IPv6:
-			ipv6 = settings.Config.Bind_To_IPv6
-			if not ipv6.startswith('::ffff:'):
+		# Priority 2: Use Bind_To6 (set by FindLocalIP6 at startup)
+		if hasattr(settings.Config, 'Bind_To6') and settings.Config.Bind_To6:
+			ipv6 = settings.Config.Bind_To6
+			if ipv6 and ipv6 not in ('::1', '::') and not ipv6.startswith('::ffff:'):
 				return ipv6
 		
-		# Priority 3 & 4: Try to auto-detect IPv6 on the interface
-		# FIXED: Prefer link-local fe80:: (always reachable on local segment)
-		# Only use global IPv6 as fallback (may not be routable locally)
-		try:
-			import netifaces
-			
-			target_iface = None
-			
-			# Find interface from IPv4 address
-			ipv4 = settings.Config.Bind_To
-			
-			for iface in netifaces.interfaces():
-				try:
-					addrs = netifaces.ifaddresses(iface)
-					
-					# Check if this interface has our IPv4
-					if netifaces.AF_INET in addrs:
-						for addr in addrs[netifaces.AF_INET]:
-							if addr.get('addr') == ipv4:
-								target_iface = iface
-								break
-					if target_iface:
-						break
-				except:
-					continue
-			
-			# If no interface found via IPv4, use configured interface
-			if not target_iface and hasattr(settings.Config, 'Interface') and settings.Config.Interface:
-				target_iface = settings.Config.Interface
-			
-			if target_iface:
-				try:
-					addrs = netifaces.ifaddresses(target_iface)
-					if netifaces.AF_INET6 in addrs:
-						global_ipv6 = None
-						linklocal_ipv6 = None
-						
-						for ipv6_addr in addrs[netifaces.AF_INET6]:
-							ipv6 = ipv6_addr.get('addr', '').split('%')[0]  # Remove %interface suffix
-							
-							if not ipv6 or ipv6.startswith('::ffff:') or ipv6 == '::1':
-								continue
-							
-							if ipv6.startswith('fe80:'):
-								# Link-local - PREFERRED for local network attacks
-								if not linklocal_ipv6:
-									linklocal_ipv6 = ipv6
-							else:
-								# Global IPv6 - fallback only
-								if not global_ipv6:
-									global_ipv6 = ipv6
-						
-						# Priority 3: Return link-local IPv6 (always works on local segment!)
-						if linklocal_ipv6:
-							return linklocal_ipv6
-						
-						# Priority 4: Fall back to global (may not be reachable locally)
-						if global_ipv6:
-							return global_ipv6
-				except:
-					pass
-					
-		except ImportError:
-			pass  # netifaces not available
-		except Exception as e:
-			pass  # IPv6 detection failed silently
-		
-		# No IPv6 found at all (IPv6 disabled on system)
+		# No valid IPv6 available
 		return None
 	
 	def get_type_name(self, query_type):
