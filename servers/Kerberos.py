@@ -679,14 +679,12 @@ class KerbTCP(BaseRequestHandler):
 							else:
 								hash_value = '$krb5pa$23$%s$%s$dummy$%s' % (cname, realm, cipher_hex)
 								
-						elif etype_num == 0x12:  # AES256 (18)
-							checksum = cipher_hex[-24:]
-							salt = realm + cname
-							hash_value = '$krb5pa$18$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
-						elif etype_num == 0x11:  # AES128 (17)
-							checksum = cipher_hex[-24:]
-							salt = realm + cname
-							hash_value = '$krb5pa$17$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
+						elif etype_num == 0x12:  # AES256 (18) - hashcat mode 19900
+							# Format: $krb5pa$18$user$realm$cipher (hashcat computes salt internally)
+							hash_value = '$krb5pa$18$%s$%s$%s' % (cname, realm, cipher_hex)
+						elif etype_num == 0x11:  # AES128 (17) - hashcat mode 19800
+							# Format: $krb5pa$17$user$realm$cipher (hashcat computes salt internally)
+							hash_value = '$krb5pa$17$%s$%s$%s' % (cname, realm, cipher_hex)
 						else:
 							hash_value = '$krb5pa$%d$%s$%s$%s' % (etype_num, cname, realm, cipher_hex)
 						
@@ -703,7 +701,14 @@ class KerbTCP(BaseRequestHandler):
 						
 						# Print the hash
 						if settings.Config.Verbose:
-							print(text('[KERB] Use hashcat -m 7500 (etype %d): %s' % (etype_num, hash_value)))
+							if etype_num == 0x17 or etype_num == 0x18:
+								print(text('[KERB] Use hashcat -m 7500 (etype 23): %s' % hash_value))
+							elif etype_num == 0x12:
+								print(text('[KERB] Use hashcat -m 19900 (etype 18): %s' % hash_value))
+							elif etype_num == 0x11:
+								print(text('[KERB] Use hashcat -m 19800 (etype 17): %s' % hash_value))
+							else:
+								print(text('[KERB] Kerberos hash (etype %d): %s' % (etype_num, hash_value)))
 					else:
 						if settings.Config.Verbose:
 							print(color('[KERB] AS-REQ with PA-DATA but could not extract hash from %s@%s' % (cname, realm), 1, 1))
@@ -798,14 +803,12 @@ class KerbUDP(BaseRequestHandler):
 							else:
 								hash_value = '$krb5pa$23$%s$%s$dummy$%s' % (cname, realm, cipher_hex)
 								
-						elif etype_num == 0x12:  # AES256 (18)
-							checksum = cipher_hex[-24:]
-							salt = realm + cname
-							hash_value = '$krb5pa$18$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
-						elif etype_num == 0x11:  # AES128 (17)
-							checksum = cipher_hex[-24:]
-							salt = realm + cname
-							hash_value = '$krb5pa$17$%s$%s$%s$%s$%s' % (cname, realm, salt, cipher_hex, checksum)
+						elif etype_num == 0x12:  # AES256 (18) - hashcat mode 19900
+							# Format: $krb5pa$18$user$realm$cipher (hashcat computes salt internally)
+							hash_value = '$krb5pa$18$%s$%s$%s' % (cname, realm, cipher_hex)
+						elif etype_num == 0x11:  # AES128 (17) - hashcat mode 19800
+							# Format: $krb5pa$17$user$realm$cipher (hashcat computes salt internally)
+							hash_value = '$krb5pa$17$%s$%s$%s' % (cname, realm, cipher_hex)
 						else:
 							hash_value = '$krb5pa$%d$%s$%s$%s' % (etype_num, cname, realm, cipher_hex)
 						
@@ -821,7 +824,14 @@ class KerbUDP(BaseRequestHandler):
 						})
 						
 						# Print the hash
-						print(color('[KERB] Kerberos 5 AS-REQ (etype %d): %s' % (etype_num, hash_value), 3, 1))
+						if etype_num == 0x17 or etype_num == 0x18:
+							print(color('[KERB] Kerberos Pre-Auth (hashcat -m 7500): %s' % hash_value, 3, 1))
+						elif etype_num == 0x12:
+							print(color('[KERB] Kerberos Pre-Auth (hashcat -m 19900): %s' % hash_value, 3, 1))
+						elif etype_num == 0x11:
+							print(color('[KERB] Kerberos Pre-Auth (hashcat -m 19800): %s' % hash_value, 3, 1))
+						else:
+							print(color('[KERB] Kerberos 5 AS-REQ (etype %d): %s' % (etype_num, hash_value), 3, 1))
 					else:
 						if settings.Config.Verbose:
 							print(color('[KERB] AS-REQ with PA-DATA but could not extract hash from %s@%s' % (cname, realm), 1, 1))
