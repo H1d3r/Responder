@@ -536,12 +536,13 @@ class DNS(BaseRequestHandler):
 		Priority order:
 		1. ExternalIP6 (-6 command line option)
 		2. Bind_To_IPv6 from config file
-		3. Global IPv6 on interface (auto-detected)
-		4. Link-local fe80:: on interface (fallback - always available!)
+		3. Link-local fe80:: on interface (PREFERRED - always reachable locally!)
+		4. Global IPv6 on interface (fallback - may not be routable on local segment)
 		
-		Link-local addresses work for Responder because:
+		Link-local addresses are preferred because:
 		- Responder operates on the local network segment
-		- Clients on the same segment can reach fe80:: addresses
+		- Link-local addresses are ALWAYS reachable on the local segment
+		- Global /128 addresses may not be routable without proper IPv6 infrastructure
 		- fe80:: is always available when IPv6 is enabled
 		
 		Does NOT return IPv4-mapped addresses (::ffff:x.x.x.x).
@@ -560,8 +561,8 @@ class DNS(BaseRequestHandler):
 				return ipv6
 		
 		# Priority 3 & 4: Try to auto-detect IPv6 on the interface
-		# First pass: look for global IPv6
-		# Second pass: accept link-local fe80::
+		# FIXED: Prefer link-local fe80:: (always reachable on local segment)
+		# Only use global IPv6 as fallback (may not be routable locally)
 		try:
 			import netifaces
 			
@@ -603,21 +604,21 @@ class DNS(BaseRequestHandler):
 								continue
 							
 							if ipv6.startswith('fe80:'):
-								# Link-local - save as fallback
+								# Link-local - PREFERRED for local network attacks
 								if not linklocal_ipv6:
 									linklocal_ipv6 = ipv6
 							else:
-								# Global IPv6 - preferred
+								# Global IPv6 - fallback only
 								if not global_ipv6:
 									global_ipv6 = ipv6
 						
-						# Priority 3: Return global IPv6 if available
-						if global_ipv6:
-							return global_ipv6
-						
-						# Priority 4: Fall back to link-local
+						# Priority 3: Return link-local IPv6 (always works on local segment!)
 						if linklocal_ipv6:
 							return linklocal_ipv6
+						
+						# Priority 4: Fall back to global (may not be reachable locally)
+						if global_ipv6:
+							return global_ipv6
 				except:
 					pass
 					
