@@ -23,7 +23,7 @@ import subprocess
 
 from utils import *
 
-__version__ = 'Responder 3.2.1.0'
+__version__ = 'Responder 3.2.2.0'
 
 class Settings:
 	
@@ -178,6 +178,8 @@ class Settings:
 		self.Quiet_Mode			= options.Quiet
 		self.AnswerName			= options.AnswerName
 		self.ErrorCode          = options.ErrorCode
+		self.RDNSS_On_Off = options.RDNSS_On_Off
+		self.DNSSL_Domain = options.DNSSL_Domain
 
 		# TTL blacklist. Known to be detected by SOC / XDR
 		TTL_blacklist = [b"\x00\x00\x00\x1e", b"\x00\x00\x00\x78", b"\x00\x00\x00\xa5"]

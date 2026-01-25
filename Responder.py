@@ -138,6 +138,19 @@ def create_parser():
         default=None,
         help="Poison with a different IPv6 address than Responder's.")
     
+    poisoning.add_option('--rdnss',
+        action="store_true",
+        dest="RDNSS_On_Off",
+        default=False,
+        help="Poison via Router Advertisements with RDNSS. Sets attacker as IPv6 DNS.")
+    
+    poisoning.add_option('--dnssl',
+        action="store",
+        dest="DNSSL_Domain",
+        metavar="DOMAIN",
+        default=None,
+        help="Poison via Router Advertisements with DNSSL. Injects DNS search suffix.")
+    
     poisoning.add_option('-t', '--ttl',
         action="store",
         dest="TTL",
@@ -579,7 +592,15 @@ def main():
 		# DHCPv6 Server (disabled by default, enable with --dhcpv6)
 		if settings.Config.DHCPv6_On_Off:
 		    from servers.DHCPv6 import DHCPv6
-		    threads.append(Thread(target=serve_thread_dhcpv6, args=('', 547, DHCPv6,)))	
+		    threads.append(Thread(target=serve_thread_dhcpv6, args=('', 547, DHCPv6,)))
+
+		if settings.Config.RDNSS_On_Off or settings.Config.DNSSL_Domain:
+		    from poisoners.RDNSS import RDNSS
+		    threads.append(Thread(target=RDNSS, args=(
+        settings.Config.Interface,      # 1. interface
+        settings.Config.RDNSS_On_Off,   # 2. rdnss_enabled (bool) 
+        settings.Config.DNSSL_Domain    # 3. dnssl_domain (str or None)
+    )))
 			    
 		# Load MDNS, NBNS and LLMNR Poisoners
 		if settings.Config.LLMNR_On_Off:
