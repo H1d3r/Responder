@@ -20,6 +20,7 @@ import re
 import logging
 import socket
 import time
+import threading
 import settings
 import datetime
 import codecs
@@ -86,6 +87,9 @@ try:
 except:
 	print("[!] Please install python-sqlite3 extension.")
 	sys.exit(0)
+
+# Thread lock for database operations to prevent "database is locked" errors
+_db_lock = threading.Lock()
 
 def color(txt, code = 1, modifier = 0):
 	if txt.startswith('[*]'):
@@ -400,6 +404,7 @@ def NetworkRecvBufferPython2or3(data):
 def CreateResponderDb():
 	if not os.path.exists(settings.Config.DatabaseFile):
 		cursor = sqlite3.connect(settings.Config.DatabaseFile)
+		cursor.execute('PRAGMA journal_mode=WAL')
 		cursor.execute('CREATE TABLE Poisoned (timestamp TEXT, Poisoner TEXT, SentToIp TEXT, ForName TEXT, AnalyzeMode TEXT)')
 		cursor.commit()
 		cursor.execute('CREATE TABLE responder (timestamp TEXT, module TEXT, type TEXT, client TEXT, hostname TEXT, user TEXT, cleartext TEXT, hash TEXT, fullhash TEXT)')
@@ -420,64 +425,66 @@ def SaveToDb(result):
 		#text("[*] Skipping one character username: %s" % result['user'])
 		return
 
-	cursor = sqlite3.connect(settings.Config.DatabaseFile)
-	cursor.text_factory = sqlite3.Binary  # We add a text factory to support different charsets
-	
-	if len(result['cleartext']):
-		fname = '%s-%s-ClearText-%s.txt' % (result['module'], result['type'], result['client'])
-		res = cursor.execute("SELECT COUNT(*) AS count FROM responder WHERE module=? AND type=? AND client=? AND LOWER(user)=LOWER(?) AND cleartext=?", (result['module'], result['type'], result['client'], result['user'], result['cleartext']))
-	else:
-		fname = '%s-%s-%s.txt' % (result['module'], result['type'], result['client'])
-		res = cursor.execute("SELECT COUNT(*) AS count FROM responder WHERE module=? AND type=? AND client=? AND LOWER(user)=LOWER(?)", (result['module'], result['type'], result['client'], result['user']))
-
-	(count,) = res.fetchone()
-	logfile = os.path.join(settings.Config.ResponderPATH, 'logs', fname)
-
-	if not count:
-		cursor.execute("INSERT INTO responder VALUES(datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)", (result['module'], result['type'], result['client'], result['hostname'], result['user'], result['cleartext'], result['hash'], result['fullhash']))
-		cursor.commit()
-
-	if not count or settings.Config.CaptureMultipleHashFromSameHost:
-		with open(logfile,"a") as outf:
-			if len(result['cleartext']):  # If we obtained cleartext credentials, write them to file
-				outf.write('%s:%s\n' % (result['user'].encode('utf8', 'replace'), result['cleartext'].encode('utf8', 'replace')))
-			else:  # Otherwise, write JtR-style hash string to file
-				outf.write(result['fullhash'] + '\n')#.encode('utf8', 'replace') + '\n')
-
-	if not count or settings.Config.Verbose:  # Print output
-		if len(result['client']):
-			print(text("[%s] %s Client   : %s" % (result['module'], result['type'], color(result['client'], 3))))
-
-		if len(result['hostname']):
-			print(text("[%s] %s Hostname : %s" % (result['module'], result['type'], color(result['hostname'], 3))))
-
-		if len(result['user']):
-			print(text("[%s] %s Username : %s" % (result['module'], result['type'], color(result['user'], 3))))
-
-		# Bu order of priority, print cleartext, fullhash, or hash
+	with _db_lock:
+		cursor = sqlite3.connect(settings.Config.DatabaseFile, timeout=10)
+		cursor.execute('PRAGMA journal_mode=WAL')
+		cursor.text_factory = sqlite3.Binary  # We add a text factory to support different charsets
+		
 		if len(result['cleartext']):
-			print(text("[%s] %s Password : %s" % (result['module'], result['type'], color(result['cleartext'], 3))))
+			fname = '%s-%s-ClearText-%s.txt' % (result['module'], result['type'], result['client'])
+			res = cursor.execute("SELECT COUNT(*) AS count FROM responder WHERE module=? AND type=? AND client=? AND LOWER(user)=LOWER(?) AND cleartext=?", (result['module'], result['type'], result['client'], result['user'], result['cleartext']))
+		else:
+			fname = '%s-%s-%s.txt' % (result['module'], result['type'], result['client'])
+			res = cursor.execute("SELECT COUNT(*) AS count FROM responder WHERE module=? AND type=? AND client=? AND LOWER(user)=LOWER(?)", (result['module'], result['type'], result['client'], result['user']))
 
-		elif len(result['fullhash']):
-			print(text("[%s] %s Hash     : %s" % (result['module'], result['type'], color(result['fullhash'], 3))))
+		(count,) = res.fetchone()
+		logfile = os.path.join(settings.Config.ResponderPATH, 'logs', fname)
 
-		elif len(result['hash']):
-			print(text("[%s] %s Hash     : %s" % (result['module'], result['type'], color(result['hash'], 3))))
+		if not count:
+			cursor.execute("INSERT INTO responder VALUES(datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)", (result['module'], result['type'], result['client'], result['hostname'], result['user'], result['cleartext'], result['hash'], result['fullhash']))
+			cursor.commit()
 
-		# Appending auto-ignore list if required
-		# Except if this is a machine account's hash
-		if settings.Config.AutoIgnore and not result['user'].endswith('$'):
-			settings.Config.AutoIgnoreList.append(result['client'])
-			print(color('[*] Adding client %s to auto-ignore list' % result['client'], 4, 1))
-	elif len(result['cleartext']):
-		print(color('[*] Skipping previously captured cleartext password for %s' % result['user'], 3, 1))
-		text('[*] Skipping previously captured cleartext password for %s' % result['user'])
-	else:
-		print(color('[*] Skipping previously captured hash for %s' % result['user'], 3, 1))
-		text('[*] Skipping previously captured hash for %s' % result['user'])
-		cursor.execute("UPDATE responder SET timestamp=datetime('now') WHERE user=? AND client=?", (result['user'], result['client']))
-		cursor.commit()
-	cursor.close()
+		if not count or settings.Config.CaptureMultipleHashFromSameHost:
+			with open(logfile,"a") as outf:
+				if len(result['cleartext']):  # If we obtained cleartext credentials, write them to file
+					outf.write('%s:%s\n' % (result['user'].encode('utf8', 'replace'), result['cleartext'].encode('utf8', 'replace')))
+				else:  # Otherwise, write JtR-style hash string to file
+					outf.write(result['fullhash'] + '\n')#.encode('utf8', 'replace') + '\n')
+
+		if not count or settings.Config.Verbose:  # Print output
+			if len(result['client']):
+				print(text("[%s] %s Client   : %s" % (result['module'], result['type'], color(result['client'], 3))))
+
+			if len(result['hostname']):
+				print(text("[%s] %s Hostname : %s" % (result['module'], result['type'], color(result['hostname'], 3))))
+
+			if len(result['user']):
+				print(text("[%s] %s Username : %s" % (result['module'], result['type'], color(result['user'], 3))))
+
+			# Bu order of priority, print cleartext, fullhash, or hash
+			if len(result['cleartext']):
+				print(text("[%s] %s Password : %s" % (result['module'], result['type'], color(result['cleartext'], 3))))
+
+			elif len(result['fullhash']):
+				print(text("[%s] %s Hash     : %s" % (result['module'], result['type'], color(result['fullhash'], 3))))
+
+			elif len(result['hash']):
+				print(text("[%s] %s Hash     : %s" % (result['module'], result['type'], color(result['hash'], 3))))
+
+			# Appending auto-ignore list if required
+			# Except if this is a machine account's hash
+			if settings.Config.AutoIgnore and not result['user'].endswith('$'):
+				settings.Config.AutoIgnoreList.append(result['client'])
+				print(color('[*] Adding client %s to auto-ignore list' % result['client'], 4, 1))
+		elif len(result['cleartext']):
+			print(color('[*] Skipping previously captured cleartext password for %s' % result['user'], 3, 1))
+			text('[*] Skipping previously captured cleartext password for %s' % result['user'])
+		else:
+			print(color('[*] Skipping previously captured hash for %s' % result['user'], 3, 1))
+			text('[*] Skipping previously captured hash for %s' % result['user'])
+			cursor.execute("UPDATE responder SET timestamp=datetime('now') WHERE user=? AND client=?", (result['user'], result['client']))
+			cursor.commit()
+		cursor.close()
 
 def SavePoisonersToDb(result):
 
@@ -485,32 +492,37 @@ def SavePoisonersToDb(result):
 		if not k in result:
 			result[k] = ''
 	result['SentToIp'] = result['SentToIp'].replace("::ffff:","")
-	cursor = sqlite3.connect(settings.Config.DatabaseFile)
-	cursor.text_factory = sqlite3.Binary  # We add a text factory to support different charsets
-	res = cursor.execute("SELECT COUNT(*) AS count FROM Poisoned WHERE Poisoner=? AND SentToIp=? AND ForName=? AND AnalyzeMode=?", (result['Poisoner'], result['SentToIp'], result['ForName'], result['AnalyzeMode']))
-	(count,) = res.fetchone()
-        
-	if not count:
-		cursor.execute("INSERT INTO Poisoned VALUES(datetime('now'), ?, ?, ?, ?)", (result['Poisoner'], result['SentToIp'], result['ForName'], result['AnalyzeMode']))
-		cursor.commit()
+	
+	with _db_lock:
+		cursor = sqlite3.connect(settings.Config.DatabaseFile, timeout=10)
+		cursor.execute('PRAGMA journal_mode=WAL')
+		cursor.text_factory = sqlite3.Binary  # We add a text factory to support different charsets
+		res = cursor.execute("SELECT COUNT(*) AS count FROM Poisoned WHERE Poisoner=? AND SentToIp=? AND ForName=? AND AnalyzeMode=?", (result['Poisoner'], result['SentToIp'], result['ForName'], result['AnalyzeMode']))
+		(count,) = res.fetchone()
+	        
+		if not count:
+			cursor.execute("INSERT INTO Poisoned VALUES(datetime('now'), ?, ?, ?, ?)", (result['Poisoner'], result['SentToIp'], result['ForName'], result['AnalyzeMode']))
+			cursor.commit()
 
-	cursor.close()
+		cursor.close()
 
 def SaveDHCPToDb(result):
 	for k in [ 'MAC', 'IP', 'RequestedIP']:
 		if not k in result:
 			result[k] = ''
 
-	cursor = sqlite3.connect(settings.Config.DatabaseFile)
-	cursor.text_factory = sqlite3.Binary  # We add a text factory to support different charsets
-	res = cursor.execute("SELECT COUNT(*) AS count FROM DHCP WHERE MAC=? AND IP=? AND RequestedIP=?", (result['MAC'], result['IP'], result['RequestedIP']))
-	(count,) = res.fetchone()
-        
-	if not count:
-		cursor.execute("INSERT INTO DHCP VALUES(datetime('now'), ?, ?, ?)", (result['MAC'], result['IP'], result['RequestedIP']))
-		cursor.commit()
+	with _db_lock:
+		cursor = sqlite3.connect(settings.Config.DatabaseFile, timeout=10)
+		cursor.execute('PRAGMA journal_mode=WAL')
+		cursor.text_factory = sqlite3.Binary  # We add a text factory to support different charsets
+		res = cursor.execute("SELECT COUNT(*) AS count FROM DHCP WHERE MAC=? AND IP=? AND RequestedIP=?", (result['MAC'], result['IP'], result['RequestedIP']))
+		(count,) = res.fetchone()
+	        
+		if not count:
+			cursor.execute("INSERT INTO DHCP VALUES(datetime('now'), ?, ?, ?)", (result['MAC'], result['IP'], result['RequestedIP']))
+			cursor.commit()
 
-	cursor.close()
+		cursor.close()
 	
 def Parse_IPV6_Addr(data):
 	if data[len(data)-4:len(data)] == b'\x00\x1c\x00\x01':
