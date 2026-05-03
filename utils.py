@@ -118,6 +118,12 @@ def IsOnTheSameSubnet(ip, net):
 
 def RespondToThisIP(ClientIp):
 
+	# IPv4-mapped IPv6 addresses ("::ffff:10.0.0.1") arrive at dual-stack
+	# sockets and bypass the DontRespondTo / 127.0.0. checks below unless we
+	# normalise them back to plain IPv4 before comparison. See lgandx/Responder#314.
+	if ClientIp.lower().startswith('::ffff:'):
+		ClientIp = ClientIp[len('::ffff:'):]
+
 	if ClientIp.startswith('127.0.0.'):
 		return False
 	elif settings.Config.AutoIgnore and ClientIp in settings.Config.AutoIgnoreList:

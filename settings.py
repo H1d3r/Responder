@@ -42,12 +42,20 @@ class Settings:
 		return str.upper() == 'ON'
 
 	def ExpandIPRanges(self):
-		def expand_ranges(lst):	
+		def expand_ranges(lst):
 			ret = []
 			for l in lst:
-				if ':' in l: #For IPv6 addresses, similar to the IPv4 version below but hex and pads :'s to expand shortend addresses 
-					while l.count(':') < 7: 
+				# IPv4-mapped IPv6 addresses ("::ffff:10.0.0.1") collapse to the
+				# embedded IPv4 address so the IPv4 branch below handles them and
+				# RespondToThisIP() / RespondToThisName() can match the same entry
+				# whether the client arrives over IPv4 or a dual-stack socket.
+				if l.lower().startswith('::ffff:') and '.' in l:
+					l = l[len('::ffff:'):]
+				if ':' in l: #For IPv6 addresses, similar to the IPv4 version below but hex and pads :'s to expand shortend addresses
+					while l.count(':') < 7:
 						pos = l.find('::')
+						if pos == -1:
+							break
 						l = l[:pos] + ':' + l[pos:]
 					tab = l.split(':')
 					x = {}
